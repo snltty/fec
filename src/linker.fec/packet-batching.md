@@ -5,7 +5,7 @@
 3. `LinkerFecCodec.EncodePacket` 的输入始终是一个或多个完整 `[length][packet]` record；单包普通 FEC 也使用同样格式。
 4. Packet batcher 每次只取完整 record 列表，并把它作为一个普通 FEC 包交给 `LinkerFecCodec.EncodePacket`。每批同时受两个上限约束：业务 payload 总长度不超过 `SymbolSize * SourceSymbolsPerBlock`，原始业务包数量不超过 `SourceSymbolsPerBlock`；本地 4-byte record length 不占用 source symbol 容量。
 5. `EncodePacket` 会把每个 record 作为一个 source symbol/frame，不再把多个小 record 塞进同一个 source frame。比如 10/2 满批会输出 `10 source + 2 repair`，避免丢一个 source frame 就丢掉整批包。
-6. Repair 数量按实际 source 数量动态缩放：`RepairSymbolsPerBlock` 是上限，`MinimumRepairSymbolsPerEncodedBlock` 是每个非空 block 的下限。比如 10/4 默认 1 个 source 输出 1 个 repair；把最小值设为 3 时，1 个 source 输出 3 个 repair。
+6. Repair 数量按 `ceil(sourceCount * RepairSymbolsPerBlock / SourceSymbolsPerBlock)` 计算，最少 1 个、最多 `RepairSymbolsPerBlock` 个。比如 10/4 下 1 个 source 输出 1 个 repair、3 个 source 输出 2 个 repair、10 个 source 输出 4 个 repair；1/2、1/3 表示 1 个 source 对应 2/3 个 repair，用于极端网络下多倍发包。
 7. Packet batcher 输出与普通 packetized encode 一致：连续的 `[4-byte little-endian frame length][FEC frame]`。调用方逐个 UDP datagram 发送时读取本地 4-byte frame length，只发送后面的 FEC frame；这个 4-byte frame length 不计入网络带宽。
 8. B 收到 FEC frame 后直接调用 `LinkerFecCodec.DecodeFrame(frame, destination)`。
 9. Decode 成功时，`destination[..decodedLength]` 就是完整业务 record 列表：`[4-byte little-endian length][packet][length][packet]...`，业务方只按长度前缀读取即可，不需要额外 decoder。

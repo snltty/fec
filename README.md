@@ -81,7 +81,7 @@
 
 ## 性能测试
 
-测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、i9 9900kf、32GB
+测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、I9 9900KF、32GB
 
 ### 独立性能encode/decode 
 
@@ -113,12 +113,7 @@
 
 ### 包批处理 encode/decode
 
-10/2，10数据包+ 2冗余包，生成 10 source frame + 2 repair frame
-
-`RepairSymbolsPerBlock` 是每个 FEC block 的 repair 上限，实际 repair 数会按 source 数量动态缩放；`MinimumRepairSymbolsPerEncodedBlock` 可以提高小批次的 repair 下限，例如极端网络下让 `1 source` 对应 `2/3 repair`。
-
-1. source frame = 13B header + payload
-2. repair frame = 13B header + 2B length symbol + trimmed repair payload`。
+Repair 数量按 `ceil(sourceCount * RepairSymbolsPerBlock / SourceSymbolsPerBlock)` 计算，最少 1 个、最多 `RepairSymbolsPerBlock` 个。`10/2`、`10/4` 这类配置会按实际 source 数量成比例缩放；`1/2`、`1/3` 这类配置表示 1 个 source 对应 2/3 个 repair，用于极端网络下多倍发包。
 
 | 操作 | 原始包数 | FEC帧数 | 带宽比 |
 |---|---:|---:|---:|

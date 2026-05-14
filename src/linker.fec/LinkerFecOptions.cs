@@ -20,7 +20,6 @@ public sealed class LinkerFecOptions
     public int SymbolSize { get; init; } = 1440;
     public int SourceSymbolsPerBlock { get; init; } = 2;
     public int RepairSymbolsPerBlock { get; init; } = 1;
-    public int MinimumRepairSymbolsPerEncodedBlock { get; init; } = 1;
     public int MaxDecoderBlocks { get; init; } = 256;
     public int MaxSkipBlocks { get; init; } = 10;
     public LinkerFecRepairGenerationMode RepairGenerationMode { get; init; } = LinkerFecRepairGenerationMode.Auto;
@@ -51,9 +50,7 @@ public sealed class LinkerFecOptions
 
         var proportionalRepairCount = checked(
             ((sourceSymbolCount * RepairSymbolsPerBlock) + SourceSymbolsPerBlock - 1) / SourceSymbolsPerBlock);
-        return Math.Min(
-            RepairSymbolsPerBlock,
-            Math.Max(MinimumRepairSymbolsPerEncodedBlock, proportionalRepairCount));
+        return Math.Min(RepairSymbolsPerBlock, Math.Max(MinRepairSymbolsPerBlock, proportionalRepairCount));
     }
 
     internal void Validate()
@@ -74,22 +71,6 @@ public sealed class LinkerFecOptions
         {
             throw new ArgumentOutOfRangeException(nameof(RepairSymbolsPerBlock), RepairSymbolsPerBlock,
                 $"Repair symbol count must be in [{MinRepairSymbolsPerBlock}, {MaxRepairSymbolsPerBlock}].");
-        }
-
-        if (MinimumRepairSymbolsPerEncodedBlock is < MinRepairSymbolsPerBlock or > MaxRepairSymbolsPerBlock)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MinimumRepairSymbolsPerEncodedBlock),
-                MinimumRepairSymbolsPerEncodedBlock,
-                $"Minimum repair symbol count must be in [{MinRepairSymbolsPerBlock}, {MaxRepairSymbolsPerBlock}].");
-        }
-
-        if (MinimumRepairSymbolsPerEncodedBlock > RepairSymbolsPerBlock)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(MinimumRepairSymbolsPerEncodedBlock),
-                MinimumRepairSymbolsPerEncodedBlock,
-                "Minimum repair symbol count cannot exceed the configured repair symbols per block.");
         }
 
         if (SourceSymbolsPerBlock + RepairSymbolsPerBlock > MaxSymbolsPerBlock)

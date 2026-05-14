@@ -32,7 +32,7 @@ var tests = new (string Name, Func<Task> Body)[]
     ("decoded packet kinds track each output record", DecodedPacketKindsTrackEachOutputRecord),
     ("record length prefix does not consume symbol capacity", RecordLengthPrefixDoesNotConsumeSymbolCapacity),
     ("partial source count scales repair symbols", PartialSourceCountScalesRepairSymbols),
-    ("minimum repair symbols per encoded block is honored", MinimumRepairSymbolsPerEncodedBlockIsHonored),
+    ("single source ratio emits multiple repair symbols", SingleSourceRatioEmitsMultipleRepairSymbols),
     ("single source repair frame is trimmed", SingleSourceRepairFrameIsTrimmed),
     ("intermediate repair generation matches direct repair", IntermediateRepairGenerationMatchesDirectRepair),
     ("payload-length header keeps 1400 byte frames self-delimiting", PayloadLengthHeaderKeeps1400ByteFramesSelfDelimiting),
@@ -446,18 +446,16 @@ static Task PartialSourceCountScalesRepairSymbols()
     return Task.CompletedTask;
 }
 
-static Task MinimumRepairSymbolsPerEncodedBlockIsHonored()
+static Task SingleSourceRatioEmitsMultipleRepairSymbols()
 {
     var options = new LinkerFecOptions
     {
         SymbolSize = 128,
-        SourceSymbolsPerBlock = 10,
-        RepairSymbolsPerBlock = 4,
-        MinimumRepairSymbolsPerEncodedBlock = 3
+        SourceSymbolsPerBlock = 1,
+        RepairSymbolsPerBlock = 3
     };
 
-    Assert(options.GetRepairSymbolsForSourceCount(1) == 3, "Expected the configured minimum repair count for one source.");
-    Assert(options.GetRepairSymbolsForSourceCount(10) == 4, "Expected full blocks to stay capped at RepairSymbolsPerBlock.");
+    Assert(options.GetRepairSymbolsForSourceCount(1) == 3, "Expected 1/3 to use three repairs for one source.");
 
     var packet = DeterministicBytes(17);
     var frames = EncodeRecordListToFrames(CreatePacketRecord(packet), options);
@@ -479,8 +477,8 @@ static Task SingleSourceRepairFrameIsTrimmed()
 {
     var options = new LinkerFecOptions
     {
-        RepairSymbolsPerBlock = 2,
-        MinimumRepairSymbolsPerEncodedBlock = 2
+        SourceSymbolsPerBlock = 1,
+        RepairSymbolsPerBlock = 2
     };
     var raw = DeterministicBytes(123);
     var record = CreatePacketRecord(raw);
@@ -979,8 +977,6 @@ static Task InvalidOptionsAreRejected()
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = 0 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = -1 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = 8, MaxDecoderBlocks = 4 }));
-    _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MinimumRepairSymbolsPerEncodedBlock = 0 }));
-    _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { RepairSymbolsPerBlock = 2, MinimumRepairSymbolsPerEncodedBlock = 3 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { RepairGenerationMode = (LinkerFecRepairGenerationMode)42 }));
     return Task.CompletedTask;
 }

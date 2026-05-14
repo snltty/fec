@@ -678,7 +678,6 @@ internal static class EnvironmentReporter
         Console.WriteLine(
             $"默认配置: SymbolSize={options.SymbolSize}, SourceSymbolsPerBlock={options.SourceSymbolsPerBlock}, " +
             $"RepairSymbolsPerBlock={options.RepairSymbolsPerBlock}, " +
-            $"MinimumRepairSymbolsPerEncodedBlock={options.MinimumRepairSymbolsPerEncodedBlock}, " +
             $"MaxDecoderBlocks={options.MaxDecoderBlocks}, " +
             $"MaxSkipBlocks={options.MaxSkipBlocks}");
     }
