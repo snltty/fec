@@ -87,29 +87,29 @@
 
 | 操作 | 包长 | 平均耗时 | 吞吐 | 分配 | Gen0 | Gen1 | Gen2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Encode | 64B | 32.25 ns/op | 15.88 Gbps | 0 B/op | 0 | 0 | 0 |
-| Decode | 64B | 23.96 ns/op | 21.37 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode | 128B | 34.07 ns/op | 30.06 Gbps | 0 B/op | 0 | 0 | 0 |
-| Decode | 128B | 25.83 ns/op | 39.64 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode | 256B | 36.06 ns/op | 56.79 Gbps | 0 B/op | 0 | 0 | 0 |
-| Decode | 256B | 26.58 ns/op | 77.05 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode | 512B | 39.38 ns/op | 104.01 Gbps | 0 B/op | 0 | 0 | 0 |
-| Decode | 512B | 28.20 ns/op | 145.25 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode | 1024B | 52.05 ns/op | 157.39 Gbps | 0 B/op | 0 | 0 | 0 |
-| Decode | 1024B | 31.12 ns/op | 263.24 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode | 1400B | 59.61 ns/op | 187.89 Gbps | 0 B/op | 0 | 0 | 0 |
-| Decode | 1400B | 33.70 ns/op | 332.34 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode | 64B | 33.92 ns/op | 15.09 Gbps | 0 B/op | 0 | 0 | 0 |
+| Decode | 64B | 25.91 ns/op | 19.76 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode | 128B | 35.06 ns/op | 29.21 Gbps | 0 B/op | 0 | 0 | 0 |
+| Decode | 128B | 27.18 ns/op | 37.67 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode | 256B | 36.50 ns/op | 56.11 Gbps | 0 B/op | 0 | 0 | 0 |
+| Decode | 256B | 28.07 ns/op | 72.96 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode | 512B | 40.34 ns/op | 101.54 Gbps | 0 B/op | 0 | 0 | 0 |
+| Decode | 512B | 29.40 ns/op | 139.32 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode | 1024B | 49.93 ns/op | 164.07 Gbps | 0 B/op | 0 | 0 | 0 |
+| Decode | 1024B | 40.19 ns/op | 203.83 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode | 1400B | 61.00 ns/op | 183.61 Gbps | 0 B/op | 0 | 0 | 0 |
+| Decode | 1400B | 36.11 ns/op | 310.16 Gbps | 0 B/op | 0 | 0 | 0 |
 
 ### 整体性能 encode/decode 
 
 | 操作 | 包长 | 平均耗时 | 吞吐 | 分配 | Gen0 | Gen1 | Gen2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| Encode+Decode | 64B | 67.64 ns/op | 7.57 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode+Decode | 128B | 71.16 ns/op | 14.39 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode+Decode | 256B | 72.65 ns/op | 28.19 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode+Decode | 512B | 83.37 ns/op | 49.13 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode+Decode | 1024B | 109.65 ns/op | 74.71 Gbps | 0 B/op | 0 | 0 | 0 |
-| Encode+Decode | 1400B | 114.49 ns/op | 97.83 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode+Decode | 64B | 69.74 ns/op | 7.34 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode+Decode | 128B | 71.36 ns/op | 14.35 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode+Decode | 256B | 75.63 ns/op | 27.08 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode+Decode | 512B | 83.96 ns/op | 48.79 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode+Decode | 1024B | 107.74 ns/op | 76.03 Gbps | 0 B/op | 0 | 0 | 0 |
+| Encode+Decode | 1400B | 115.09 ns/op | 97.32 Gbps | 0 B/op | 0 | 0 | 0 |
 
 ### 包批处理 encode/decode
 
@@ -117,8 +117,8 @@ Repair 数量按 `ceil(sourceCount * RepairSymbolsPerBlock / SourceSymbolsPerBlo
 
 | 操作 | 原始包数 | FEC帧数 | 带宽比 |
 |---|---:|---:|---:|
-| Encode 10/2 64B | 100,000 | 120,002 | 1.45x |
-| Decode 10/2 64B | 100,000 | 120,002 | 1.45x |
+| Encode 10/2 64B | 100,000 | 120,001 | 1.45x |
+| Decode 10/2 64B | 100,000 | 120,001 | 1.45x |
 | Encode 10/2 128B | 100,000 | 120,000 | 1.32x |
 | Decode 10/2 128B | 100,000 | 120,000 | 1.32x |
 | Encode 10/2 256B | 100,000 | 120,000 | 1.26x |
