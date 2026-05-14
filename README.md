@@ -6,13 +6,17 @@
 
 代码在`samples/linker.fec.sample.udp`，以下表格中❌丢失、💚FEC恢复、其它正常
 
-服务端丢包 `iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.3 -j DROP` 
+服务端 `linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec`
 
-### UDP
+客户端 `linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec`
 
-服务端 `linker.fec.sample.udp.exe server ep0.0.0.0:12345`
+### 1、局域网模拟丢包
 
-客户端 `linker.fec.sample.udp.exe client ep192.168.1.3:12345`
+`iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.3 -j DROP` 
+
+`iptables -A OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.3 -j DROP`
+
+#### UDP
 
 |0|1|2|3|4|5|6|7|8|9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -27,11 +31,7 @@
 |80|81|82|83|84|85|86|87|88|89|
 |❌|91|92|❌|❌|95|96|❌|❌|99|
 
-### UDP+FEC
-
-服务端 `linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec`
-
-客户端 `linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec`
+#### UDP+FEC
 
 |0|1|2|3|4|5|6|7|8|9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -46,9 +46,42 @@
 |80|81|💚|83|84|💚|86|87|88|89|
 |90|91|92|93|💚|💚|96|97|💚|💚|
 
+### 境外垃圾
+
+#### UDP
+
+|0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
+|---|---|---|---|---|---|---|---|---|---|
+|❌|1|2|3|❌|5|❌|❌|❌|❌|
+|❌|❌|❌|13|❌|15|❌|17|❌|19|
+|20|❌|22|23|24|25|26|27|28|29|
+|❌|31|❌|❌|34|35|❌|37|❌|39|
+|40|❌|42|❌|44|❌|46|47|❌|49|
+|50|51|52|53|❌|55|❌|57|58|59|
+|❌|61|62|❌|❌|❌|66|67|❌|69|
+|70|71|❌|73|74|75|❌|77|78|79|
+|80|❌|82|83|84|❌|86|❌|88|89|
+|90|❌|❌|93|❌|❌|96|❌|❌|99|
+
+#### UDP+FEC
+
+|0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
+|---|---|---|---|---|---|---|---|---|---|
+|0|1|❌|3|4|5-FEC|❌|7|8|9-FEC|
+|10|❌|❌|❌|14|15|❌|17|18|19|
+|❌|21|❌|23|❌|25|26|27|28|29|
+|30|❌|32|33|34|35-FEC|❌|37|38|39|
+|40|41|42|43|44|45|❌|47|48|49-FEC|
+|❌|❌|❌|53-FEC|54-FEC|❌|❌|❌|❌|59|
+|60|❌|62|❌|64|65|❌|67-FEC|68-FEC|❌|
+|70|71|72|❌|❌|❌|❌|77|78|79-FEC|
+|80|81|82-FEC|83|84|85|❌|❌|88|❌|
+|90|91|92|93|94|❌|96|❌|❌|99|
+
+
 ## 性能测试
 
-测试环境: C# / .NET 8.0.26, BenchmarkDotNet 0.15.8 ShortRun InProcess；系统 Microsoft Windows 10.0.22631 X64；CPU Intel64 Family 6 Model 158 Stepping 13, GenuineIntel, 16 logical processors；内存 31.93 GiB GC available。默认配置: `SymbolSize=1440`、`SourceSymbolsPerBlock=2`、`RepairSymbolsPerBlock=1`。
+测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、i9 9900kf、32GB
 
 ### 独立性能encode/decode 
 
@@ -78,9 +111,14 @@
 | Encode+Decode | 1024B | 109.65 ns/op | 74.71 Gbps | 0 B/op | 0 | 0 | 0 |
 | Encode+Decode | 1400B | 114.49 ns/op | 97.83 Gbps | 0 B/op | 0 | 0 | 0 |
 
-### 小包批处理 encode/decode
+### 包批处理 encode/decode
 
-带宽比只统计网络发送的 FEC frame 字节，不包含本地 4-byte frame length 前缀。`source frame = 13B header + payload`；`repair frame = 13B header + 2B length symbol + trimmed repair payload`。
+10/2，10数据包+ 2冗余包，生成 10 source frame + 2 repair frame
+
+`RepairSymbolsPerBlock` 是每个 FEC block 的 repair 上限，实际 repair 数会按 source 数量动态缩放；`MinimumRepairSymbolsPerEncodedBlock` 可以提高小批次的 repair 下限，例如极端网络下让 `1 source` 对应 `2/3 repair`。
+
+1. source frame = 13B header + payload
+2. repair frame = 13B header + 2B length symbol + trimmed repair payload`。
 
 | 操作 | 原始包数 | FEC帧数 | 带宽比 |
 |---|---:|---:|---:|
@@ -96,4 +134,3 @@
 | Decode 10/2 1024B | 100,000 | 120,000 | 1.22x |
 | Encode 10/2 1400B | 100,000 | 120,000 | 1.21x |
 | Decode 10/2 1400B | 100,000 | 120,000 | 1.21x |
-

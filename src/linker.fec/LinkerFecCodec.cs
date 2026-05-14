@@ -164,13 +164,13 @@ public sealed class LinkerFecCodec : IDisposable
         bytesWritten = 0;
         packetCount = 0;
 
-        var repairSymbolCount = _options.RepairSymbolsPerBlock;
         var symbolSize = _options.SymbolSize;
         Span<int> sourceOffsets = stackalloc int[_options.SourceSymbolsPerBlock];
         Span<int> sourceLengths = stackalloc int[_options.SourceSymbolsPerBlock];
         var sourceCount = BuildSourceSegments(rawPacket, symbolSize, sourceOffsets, sourceLengths);
         sourceOffsets = sourceOffsets[..sourceCount];
         sourceLengths = sourceLengths[..sourceCount];
+        var repairSymbolCount = _options.GetRepairSymbolsForSourceCount(sourceCount);
 
         if (sourceCount == 1 && repairSymbolCount == 1)
         {
@@ -190,7 +190,16 @@ public sealed class LinkerFecCodec : IDisposable
             return false;
         }
 
-        EncodePacketCore(rawPacket, destination, sourceOffsets, sourceLengths, requiredSize, out bytesWritten, out packetCount, isFinalPacket);
+        EncodePacketCore(
+            rawPacket,
+            destination,
+            sourceOffsets,
+            sourceLengths,
+            repairSymbolCount,
+            requiredSize,
+            out bytesWritten,
+            out packetCount,
+            isFinalPacket);
         return true;
     }
 
@@ -482,6 +491,7 @@ public sealed class LinkerFecCodec : IDisposable
         Span<byte> destination,
         ReadOnlySpan<int> sourceOffsets,
         ReadOnlySpan<int> sourceLengths,
+        int repairSymbolCount,
         int requiredSize,
         out int bytesWritten,
         out int packetCount,
@@ -501,18 +511,18 @@ public sealed class LinkerFecCodec : IDisposable
                 rawPacket.Length,
                 _options.SymbolSize,
                 sourceCount,
-                _options.RepairSymbolsPerBlock,
+                repairSymbolCount,
                 i,
                 isFinalPacket,
                 rawPacket.Slice(sourceOffsets[i], sourceLengths[i]));
         }
 
-        var useIntermediateRepair = ShouldUseIntermediateRepairPath(sourceCount);
+        var useIntermediateRepair = ShouldUseIntermediateRepairPath(sourceCount, repairSymbolCount);
         var intermediateSymbols = useIntermediateRepair
             ? BuildIntermediateSymbols(sourceCount, rawPacket, sourceOffsets, sourceLengths, _options.SymbolSize)
             : ReadOnlySpan<byte>.Empty;
 
-        for (var repairIndex = 0; repairIndex < _options.RepairSymbolsPerBlock; repairIndex++)
+        for (var repairIndex = 0; repairIndex < repairSymbolCount; repairIndex++)
         {
             WriteLengthPrefixedRepairFrame(
                 destination,
@@ -522,7 +532,7 @@ public sealed class LinkerFecCodec : IDisposable
                 rawPacket.Length,
                 _options.SymbolSize,
                 sourceCount,
-                _options.RepairSymbolsPerBlock,
+                repairSymbolCount,
                 repairIndex,
                 isFinalPacket,
                 rawPacket,
@@ -767,7 +777,7 @@ public sealed class LinkerFecCodec : IDisposable
         packetCount++;
     }
 
-    private bool ShouldUseIntermediateRepairPath(int sourceCount)
+    private bool ShouldUseIntermediateRepairPath(int sourceCount, int repairSymbolCount)
     {
         if (sourceCount <= 1)
         {
@@ -778,7 +788,7 @@ public sealed class LinkerFecCodec : IDisposable
         {
             LinkerFecRepairGenerationMode.SourceCoefficients => false,
             LinkerFecRepairGenerationMode.IntermediateSymbols => true,
-            _ => sourceCount >= 64 && _options.RepairSymbolsPerBlock >= 8
+            _ => sourceCount >= 64 && repairSymbolCount >= 8
         };
     }
 

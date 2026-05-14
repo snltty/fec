@@ -31,6 +31,8 @@ var tests = new (string Name, Func<Task> Body)[]
     ("fec recovered packet count tracks only repair recoveries", FecRecoveredPacketCountTracksOnlyRepairRecoveries),
     ("decoded packet kinds track each output record", DecodedPacketKindsTrackEachOutputRecord),
     ("record length prefix does not consume symbol capacity", RecordLengthPrefixDoesNotConsumeSymbolCapacity),
+    ("partial source count scales repair symbols", PartialSourceCountScalesRepairSymbols),
+    ("minimum repair symbols per encoded block is honored", MinimumRepairSymbolsPerEncodedBlockIsHonored),
     ("single source repair frame is trimmed", SingleSourceRepairFrameIsTrimmed),
     ("intermediate repair generation matches direct repair", IntermediateRepairGenerationMatchesDirectRepair),
     ("payload-length header keeps 1400 byte frames self-delimiting", PayloadLengthHeaderKeeps1400ByteFramesSelfDelimiting),
@@ -412,11 +414,73 @@ static Task RecordLengthPrefixDoesNotConsumeSymbolCapacity()
     return Task.CompletedTask;
 }
 
+static Task PartialSourceCountScalesRepairSymbols()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 10,
+        RepairSymbolsPerBlock = 4
+    };
+
+    Assert(options.GetRepairSymbolsForSourceCount(1) == 1, "Expected 10/4 to use one repair for one source by default.");
+    Assert(options.GetRepairSymbolsForSourceCount(3) == 2, "Expected 10/4 to use two repairs for three sources.");
+    Assert(options.GetRepairSymbolsForSourceCount(10) == 4, "Expected 10/4 to use four repairs for a full source block.");
+
+    var singleRecord = CreatePacketRecord(DeterministicBytes(17));
+    var singleFrames = EncodeRecordListToFrames(singleRecord, options);
+    Assert(singleFrames.Count == 2, $"Expected 1 source + 1 repair, got {singleFrames.Count} frames.");
+    Assert(singleFrames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 1,
+        "Expected exactly one repair frame for one source.");
+
+    var threeRecords = CreatePacketRecords([
+        DeterministicBytes(17),
+        DeterministicBytes(19),
+        DeterministicBytes(23)
+    ]);
+    var threeFrames = EncodeRecordListToFrames(threeRecords, options);
+    Assert(threeFrames.Count == 5, $"Expected 3 source + 2 repair, got {threeFrames.Count} frames.");
+    Assert(threeFrames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 2,
+        "Expected exactly two repair frames for three sources.");
+
+    return Task.CompletedTask;
+}
+
+static Task MinimumRepairSymbolsPerEncodedBlockIsHonored()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 10,
+        RepairSymbolsPerBlock = 4,
+        MinimumRepairSymbolsPerEncodedBlock = 3
+    };
+
+    Assert(options.GetRepairSymbolsForSourceCount(1) == 3, "Expected the configured minimum repair count for one source.");
+    Assert(options.GetRepairSymbolsForSourceCount(10) == 4, "Expected full blocks to stay capped at RepairSymbolsPerBlock.");
+
+    var packet = DeterministicBytes(17);
+    var frames = EncodeRecordListToFrames(CreatePacketRecord(packet), options);
+    Assert(frames.Count == 4, $"Expected 1 source + 3 repair, got {frames.Count} frames.");
+    Assert(frames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 3,
+        "Expected exactly three repair frames for one source.");
+
+    var repairsOnly = frames
+        .Where(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair)
+        .Take(1)
+        .ToArray();
+    var decoded = DecodeFrames(repairsOnly, options);
+    AssertEqual(packet, decoded);
+
+    return Task.CompletedTask;
+}
+
 static Task SingleSourceRepairFrameIsTrimmed()
 {
     var options = new LinkerFecOptions
     {
-        RepairSymbolsPerBlock = 2
+        RepairSymbolsPerBlock = 2,
+        MinimumRepairSymbolsPerEncodedBlock = 2
     };
     var raw = DeterministicBytes(123);
     var record = CreatePacketRecord(raw);
@@ -874,7 +938,7 @@ static Task EmptyInputRoundTrip()
 {
     var options = TestOptions();
     var frames = EncodeToFrames([], options);
-    Assert(frames.Count == 1 + options.RepairSymbolsPerBlock, "Empty input must still emit a final block.");
+    Assert(frames.Count == 1 + options.GetRepairSymbolsForSourceCount(1), "Empty input must still emit a final block.");
     var decoded = DecodeFrames(frames, options);
     AssertEqual([], decoded);
     return Task.CompletedTask;
@@ -915,6 +979,8 @@ static Task InvalidOptionsAreRejected()
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = 0 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = -1 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = 8, MaxDecoderBlocks = 4 }));
+    _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MinimumRepairSymbolsPerEncodedBlock = 0 }));
+    _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { RepairSymbolsPerBlock = 2, MinimumRepairSymbolsPerEncodedBlock = 3 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { RepairGenerationMode = (LinkerFecRepairGenerationMode)42 }));
     return Task.CompletedTask;
 }
