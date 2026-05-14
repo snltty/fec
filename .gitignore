@@ -1,0 +1,12 @@
+.vs/
+bin/
+obj/
+BenchmarkDotNet.Artifacts/
+TestResults/
+_out/
+
+*.user
+*.suo
+*.log
+
+AGENT_MEMORY.md

@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/perf/">
+    <Project Path="perf/linker.fec.perf/linker.fec.perf.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/linker.fec.sample.udp/linker.fec.sample.udp.csproj" Id="441db494-9ffd-476c-add4-90697dc043e1" />
+    <Project Path="samples/linker.fec.sample/linker.fec.sample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/linker.fec/linker.fec.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/linker.fec.tests/linker.fec.tests.csproj" />
+  </Folder>
+</Solution>
