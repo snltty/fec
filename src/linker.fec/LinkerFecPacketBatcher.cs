@@ -5,13 +5,13 @@ using System.IO.Pipelines;
 namespace linker.fec;
 
 /// <summary>
-/// Opportunistically coalesces small application packets into
+/// Opportunistically batches small application packets into
 /// [4-byte little-endian length][packet] records and FEC-encodes the current
 /// complete record set without adding an explicit wait timer. Each batch is
 /// capped by both the FEC payload block size and SourceSymbolsPerBlock
 /// application packets.
 /// </summary>
-public sealed class StickyPacketEncoder : IDisposable
+public sealed class LinkerFecPacketBatcher : IDisposable
 {
     private const int LengthPrefixSize = sizeof(int);
     private const int MinimumPipeSegmentSize = 64 * 1024;
@@ -24,7 +24,7 @@ public sealed class StickyPacketEncoder : IDisposable
     private long _sendRemaining;
     private bool _disposed;
 
-    public StickyPacketEncoder(
+    public LinkerFecPacketBatcher(
         long maxRemaining,
         int sourceSymbolsPerBlock = 10,
         int repairSymbolsPerBlock = 2)
@@ -36,7 +36,7 @@ public sealed class StickyPacketEncoder : IDisposable
     {
     }
 
-    public StickyPacketEncoder(long maxRemaining, LinkerFecOptions? options)
+    public LinkerFecPacketBatcher(long maxRemaining, LinkerFecOptions? options)
     {
         if (maxRemaining <= 0)
         {
@@ -75,8 +75,8 @@ public sealed class StickyPacketEncoder : IDisposable
     public int LastEncodedFrameCount { get; private set; }
 
     /// <summary>
-    /// Writes one application packet. The encoder stores it as
-    /// [4-byte little-endian length][packet] before coalescing.
+    /// Writes one application packet. The batcher stores it as
+    /// [4-byte little-endian length][packet] before FEC batch encoding.
     /// </summary>
     public ValueTask<FlushResult> WriteAsync(
         ReadOnlyMemory<byte> packet,
@@ -89,7 +89,7 @@ public sealed class StickyPacketEncoder : IDisposable
             throw new ArgumentOutOfRangeException(
                 nameof(packet),
                 packet.Length,
-                "A single sticky packet payload cannot exceed one configured FEC source symbol.");
+                "A single batched packet payload cannot exceed one configured FEC source symbol.");
         }
 
         var recordLength = checked(LengthPrefixSize + packet.Length);
@@ -132,7 +132,7 @@ public sealed class StickyPacketEncoder : IDisposable
             {
                 if (result.IsCompleted)
                 {
-                    throw new InvalidDataException("Sticky packet input ended with an incomplete length-prefixed packet.");
+                    throw new InvalidDataException("Batched packet input ended with an incomplete length-prefixed packet.");
                 }
 
                 _pipe.Reader.AdvanceTo(consumed, examined);
@@ -207,18 +207,18 @@ public sealed class StickyPacketEncoder : IDisposable
             var packetLength = ReadInt32LittleEndian(remaining.Slice(0, LengthPrefixSize));
             if (packetLength < 0)
             {
-                throw new InvalidDataException("Sticky packet length cannot be negative.");
+                throw new InvalidDataException("Batched packet length cannot be negative.");
             }
 
             var recordLength = checked((long)LengthPrefixSize + packetLength);
             if (packetLength > Options.SymbolSize)
             {
-                throw new InvalidDataException("A single sticky packet payload exceeds the configured FEC symbol size.");
+                throw new InvalidDataException("A single batched packet payload exceeds the configured FEC symbol size.");
             }
 
             if (packetLength > Options.BlockSize)
             {
-                throw new InvalidDataException("A single sticky packet payload exceeds the configured FEC block size.");
+                throw new InvalidDataException("A single batched packet payload exceeds the configured FEC block size.");
             }
 
             if (remaining.Length < recordLength)

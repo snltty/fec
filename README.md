@@ -6,7 +6,7 @@
 
 代码在`samples/linker.fec.sample.udp`，以下表格中❌丢失、💚FEC恢复、其它正常
 
-服务端随机丢包30% `iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.3 -j DROP` 
+服务端丢包 `iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.3 -j DROP` 
 
 ### UDP
 
@@ -78,7 +78,7 @@
 | Encode+Decode | 1024B | 109.65 ns/op | 74.71 Gbps | 0 B/op | 0 | 0 | 0 |
 | Encode+Decode | 1400B | 114.49 ns/op | 97.83 Gbps | 0 B/op | 0 | 0 | 0 |
 
-### 小包合并 encode/decode
+### 小包批处理 encode/decode
 
 带宽比只统计网络发送的 FEC frame 字节，不包含本地 4-byte frame length 前缀。`source frame = 13B header + payload`；`repair frame = 13B header + 2B length symbol + trimmed repair payload`。
 
@@ -97,96 +97,3 @@
 | Encode 10/2 1400B | 100,000 | 120,000 | 1.21x |
 | Decode 10/2 1400B | 100,000 | 120,000 | 1.21x |
 
-## 基本用法
-
-```
-void EncodeAndDecode()
-{
-    //原始数据
-    byte[] source = Encoding.UTF8.GetBytes("hello world!");
-    //拼4字节长度前缀
-    byte[] rawPacket = new byte[sizeof(int) + source.Length];
-    BinaryPrimitives.WriteInt32LittleEndian(rawPacket.AsSpan(0, sizeof(int)), source.Length);
-    source.CopyTo(rawPacket.AsSpan(sizeof(int)));
-
-    var options = new LinkerFecOptions { 
-        SourceSymbolsPerBlock = 10,
-        RepairSymbolsPerBlock = 2, SymbolSize = 1433 
-    };
-    var encodeBuffer = new byte[options.MaxEncodeBufferSize];
-    var decodeBuffer = new byte[options.MaxDecodeBufferSize];
-    using var encoder = new LinkerFecCodec(options);
-    using var decoder = new LinkerFecCodec(options);
-
-    if (encoder.TryEncodePacket(rawPacket, encodeBuffer, out int bytesWritten, out int packetCount))
-    {
-        var memory = encodeBuffer.AsMemory(0, bytesWritten);
-        for (int i = 0; i < packetCount; i++)
-        {
-            var frameLength = BinaryPrimitives.ReadInt32LittleEndian(memory.Span);
-            var frame = memory.Slice(sizeof(int), frameLength);
-
-            if (decoder.TryDecodeFrame(frame, decodeBuffer, out bytesWritten, out var decodedPacketCount))
-            {
-                var packets = decodeBuffer.AsMemory(0, bytesWritten);
-                for (var decodedIndex = 0; decodedIndex < decodedPacketCount; decodedIndex++)
-                {
-                    var packetLength = BinaryPrimitives.ReadInt32LittleEndian(packets.Span);
-                    var packet = packets.Slice(sizeof(int), packetLength);
-                    Console.WriteLine($"decoded {Encoding.UTF8.GetString(packet.Span)}");
-                    packets = packets.Slice(sizeof(int) + packetLength);
-
-                }
-            }
-
-            memory = memory.Slice(4 + frameLength);
-        }
-    }
-}
-
-async Task EncodeAndDecodeSticky()
-{
-    var options = new LinkerFecOptions { 
-        SourceSymbolsPerBlock = 10,
-        RepairSymbolsPerBlock = 2, 
-        SymbolSize = 1433
-    };
-    var decodeBuffer = new byte[options.MaxDecodeBufferSize];
-    var decoder = new LinkerFecCodec(options);
-    StickyPacketEncoder stickyEncoder = new StickyPacketEncoder(256 * 1024, options);
-    _ = Task.Run(async () =>
-    {
-        while (true)
-        {
-            var memory = await stickyEncoder.ReadAsync().ConfigureAwait(false);
-            do
-            {
-                var frameLength = BinaryPrimitives.ReadInt32LittleEndian(memory.Span);
-                var frame = memory.Slice(sizeof(int), frameLength);
-
-                if (decoder.TryDecodeFrame(frame, decodeBuffer, out var bytesWritten, out var decodedPacketCount))
-                {
-                    var packets = decodeBuffer.AsMemory(0, bytesWritten);
-                    do
-                    {
-                        var packetLength = BinaryPrimitives.ReadInt32LittleEndian(packets.Span);
-                        var packet = packets.Slice(sizeof(int), packetLength);
-                        Console.WriteLine($"Sticky decoded {Encoding.UTF8.GetString(packet.Span)}");
-                        packets = packets.Slice(sizeof(int) + packetLength);
-
-                    } while (packets.Length > 0);
-                }
-
-                memory = memory.Slice(sizeof(int) + frameLength);
-
-            } while (memory.Length > 0);
-        }
-    });
-
-    for (int i = 0; i < 5; i++)
-    {
-        byte[] source = Encoding.UTF8.GetBytes($"hello world!{i}");
-        await stickyEncoder.WriteAsync(source).ConfigureAwait(false);
-    }
-}
-```

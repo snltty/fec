@@ -40,12 +40,12 @@ var tests = new (string Name, Func<Task> Body)[]
     ("serialized frames round trip", SerializedFramesRoundTrip),
     ("corrupt frame is rejected", CorruptFrameIsRejected),
     ("too much loss emits only received source data", TooMuchLossDoesNotEmitRecoveredData),
-    ("sticky packets round trip", StickyPacketsRoundTrip),
-    ("sticky packets decode to length-prefixed list", StickyPacketsDecodeToLengthPrefixedList),
-    ("sticky packets recover missing source symbol", StickyPacketsRecoverMissingSourceSymbol),
-    ("sticky packets split at fec block size", StickyPacketsSplitAtFecBlockSize),
-    ("sticky packets split at source packet count", StickyPacketsSplitAtSourcePacketCount),
-    ("sticky packets large backlog round trip", StickyPacketsLargeBacklogRoundTrip),
+    ("batched packets round trip", PacketBatchRoundTrip),
+    ("batched packets decode to length-prefixed list", PacketBatchDecodesToLengthPrefixedList),
+    ("batched packets recover missing source symbol", PacketBatchRecoversMissingSourceSymbol),
+    ("batched packets split at fec block size", PacketBatchSplitsAtFecBlockSize),
+    ("batched packets split at source packet count", PacketBatchSplitsAtSourcePacketCount),
+    ("batched packets large backlog round trip", PacketBatchLargeBacklogRoundTrip),
     ("empty input round trip", EmptyInputRoundTrip),
     ("invalid application records are rejected", InvalidApplicationRecordsAreRejected),
     ("invalid options are rejected", InvalidOptionsAreRejected)
@@ -209,7 +209,7 @@ static Task PacketizedSyncEncodeDecode()
     var decodedRecordList = decodedRecords.ToArray();
     Assert(decodedRecordList.Length == record.Length, "Decoder did not emit packetized record data.");
     Assert(record.AsSpan().SequenceEqual(decodedRecordList), "Decoded packetized record data differs from input.");
-    AssertPacketSequence(packets, ParseStickyPackets(decodedRecordList));
+    AssertPacketSequence(packets, ParsePacketRecords(decodedRecordList));
     return Task.CompletedTask;
 }
 
@@ -244,7 +244,7 @@ static Task TryDecodeFrameReturnsPacketCount()
         }
 
         successes++;
-        var emittedPackets = ParseStickyPackets(decoded.AsMemory(0, decodedLength));
+        var emittedPackets = ParsePacketRecords(decoded.AsMemory(0, decodedLength));
         Assert(decodedPacketCount == emittedPackets.Count,
             $"Expected packetCount {emittedPackets.Count}, got {decodedPacketCount}.");
         decodedPackets.AddRange(emittedPackets);
@@ -285,7 +285,7 @@ static Task FecRecoveredPacketCountTracksOnlyRepairRecoveries()
             decoder.TryDecodeFrame(frame.AsSpan(), decoded.AsSpan(), out var decodedLength, out var decodedPacketCount),
             "Received source frame should be emitted directly.");
         Assert(decodedPacketCount == 1, $"Expected one direct source packet, got {decodedPacketCount}.");
-        directPackets.AddRange(ParseStickyPackets(decoded.AsMemory(0, decodedLength)));
+        directPackets.AddRange(ParsePacketRecords(decoded.AsMemory(0, decodedLength)));
         Assert(decoder.FecRecoveredPacketCount == 0, "Direct source output should not increment FEC recovery count.");
     }
 
@@ -294,7 +294,7 @@ static Task FecRecoveredPacketCountTracksOnlyRepairRecoveries()
         var frame = symbol.ToArray();
         if (decoder.TryDecodeFrame(frame.AsSpan(), decoded.AsSpan(), out var decodedLength))
         {
-            recoveredPackets.AddRange(ParseStickyPackets(decoded.AsMemory(0, decodedLength)));
+            recoveredPackets.AddRange(ParsePacketRecords(decoded.AsMemory(0, decodedLength)));
         }
     }
 
@@ -354,7 +354,7 @@ static Task DecodedPacketKindsTrackEachOutputRecord()
         "Received source frame should be emitted directly.");
     Assert(source0PacketCount == 1, $"Expected one source packet, got {source0PacketCount}.");
     Assert(packetKinds[0] == LinkerFecDecodedPacketKind.Source, "Direct source output should be marked Source.");
-    AssertPacketSequence([packets[0]], ParseStickyPackets(decoded.AsMemory(0, source0Length)));
+    AssertPacketSequence([packets[0]], ParsePacketRecords(decoded.AsMemory(0, source0Length)));
     Assert(decoder.FecRecoveredPacketCount == 0, "Direct source output should not increment FEC recovery count.");
 
     var source2 = symbols.First(symbol => !symbol.IsRepair && symbol.SymbolId == 2).ToArray();
@@ -370,7 +370,7 @@ static Task DecodedPacketKindsTrackEachOutputRecord()
     Assert(packetKinds[0] == LinkerFecDecodedPacketKind.Source, "First mixed output should be the received source packet.");
     Assert(packetKinds[1] == LinkerFecDecodedPacketKind.Recovered, "Second mixed output should be recovered.");
     Assert(packetKinds[2] == LinkerFecDecodedPacketKind.Recovered, "Third mixed output should be recovered.");
-    AssertPacketSequence([packets[2], packets[1], packets[3]], ParseStickyPackets(decoded.AsMemory(0, mixedLength)));
+    AssertPacketSequence([packets[2], packets[1], packets[3]], ParsePacketRecords(decoded.AsMemory(0, mixedLength)));
     Assert(decoder.FecRecoveredPacketCount == 2,
         $"Expected two packets recovered by FEC, got {decoder.FecRecoveredPacketCount}.");
 
@@ -407,7 +407,7 @@ static Task RecordLengthPrefixDoesNotConsumeSymbolCapacity()
     Assert(frames[2].Length == LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + options.SymbolSize,
         "Repair frame should contain length metadata plus the encoded payload bytes.");
 
-    var decodedPackets = DecodeStickyFrames(frames, options);
+    var decodedPackets = DecodeBatchedFrames(frames, options);
     AssertPacketSequence(packets, decodedPackets);
     return Task.CompletedTask;
 }
@@ -453,7 +453,7 @@ static Task SingleSourceRepairFrameIsTrimmed()
     Assert(decodedLength == record.Length, $"Expected repair-only decode length {record.Length}, got {decodedLength}.");
     Assert(record.AsSpan().SequenceEqual(decoded.AsSpan(0, decodedLength)), "Repair-only decode differs from input.");
     Assert(decoder.FecRecoveredPacketCount == 1, "Single-source repair-only decode should count one FEC recovered packet.");
-    AssertPacketSequence([raw], ParseStickyPackets(decoded.AsMemory(0, decodedLength)));
+    AssertPacketSequence([raw], ParsePacketRecords(decoded.AsMemory(0, decodedLength)));
 
     return Task.CompletedTask;
 }
@@ -563,7 +563,7 @@ static Task CompactBlockIdWrapsAcrossUIntBoundary()
             var length = decoder.DecodeFrame(frame.AsSpan(), dst.AsSpan());
             Assert(length == record.Length, $"Decoded length mismatch across block id wrap at packet {i}.");
             Assert(record.AsSpan().SequenceEqual(dst.AsSpan(0, length)), $"Decoded payload mismatch across block id wrap at packet {i}.");
-            AssertPacketSequence([raw], ParseStickyPackets(dst.AsMemory(0, length)));
+            AssertPacketSequence([raw], ParsePacketRecords(dst.AsMemory(0, length)));
         }
     }
     finally
@@ -647,7 +647,7 @@ static Task TooMuchLossDoesNotEmitRecoveredData()
     return Task.CompletedTask;
 }
 
-static async Task StickyPacketsRoundTrip()
+static async Task PacketBatchRoundTrip()
 {
     var options = new LinkerFecOptions
     {
@@ -663,7 +663,7 @@ static async Task StickyPacketsRoundTrip()
         DeterministicBytes(43)
     };
 
-    using var encoder = new StickyPacketEncoder(maxRemaining: 16 * 1024, options);
+    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
     using var decoder = new LinkerFecCodec(options);
     var decoded = new byte[options.MaxDecodeBufferSize];
 
@@ -673,16 +673,16 @@ static async Task StickyPacketsRoundTrip()
     }
 
     var encoded = await encoder.ReadAsync();
-    Assert(encoded.Length > 0, "Sticky encoder did not emit encoded data.");
-    Assert(encoder.LastRawBytes == packets.Sum(packet => packet.Length + sizeof(int)), "Sticky encoder did not coalesce the queued packets.");
+    Assert(encoded.Length > 0, "Packet batcher did not emit encoded data.");
+    Assert(encoder.LastRawBytes == packets.Sum(packet => packet.Length + sizeof(int)), "Packet batcher did not batch the queued packets.");
 
-    var stickyPackets = DecodeStickyEncodedPacket(encoded, decoder, decoded);
-    Assert(!stickyPackets.IsEmpty, "Sticky decode did not emit a packet list.");
-    var decodedPackets = ParseStickyPackets(stickyPackets);
+    var packetBatch = DecodeBatchedEncodedPacket(encoded, decoder, decoded);
+    Assert(!packetBatch.IsEmpty, "Batch decode did not emit a packet list.");
+    var decodedPackets = ParsePacketRecords(packetBatch);
     AssertPacketSequence(packets, decodedPackets);
 }
 
-static async Task StickyPacketsDecodeToLengthPrefixedList()
+static async Task PacketBatchDecodesToLengthPrefixedList()
 {
     var options = new LinkerFecOptions
     {
@@ -701,7 +701,7 @@ static async Task StickyPacketsDecodeToLengthPrefixedList()
         DeterministicBytes(63)
     };
 
-    using var encoder = new StickyPacketEncoder(maxRemaining: 16 * 1024, options);
+    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
     using var decoder = new LinkerFecCodec(options);
     var decoded = new byte[options.MaxDecodeBufferSize];
 
@@ -714,15 +714,15 @@ static async Task StickyPacketsDecodeToLengthPrefixedList()
     var expectedSourceFrames = packets.Length;
     var expectedFrameCount = expectedSourceFrames + options.RepairSymbolsPerBlock;
     Assert(encoder.LastEncodedFrameCount == expectedFrameCount,
-        $"Expected {expectedFrameCount} FEC frames for the coalesced sticky list, got {encoder.LastEncodedFrameCount}.");
+        $"Expected {expectedFrameCount} FEC frames for the packet batch, got {encoder.LastEncodedFrameCount}.");
 
-    var stickyPackets = DecodeStickyEncodedPacket(encoded, decoder, decoded);
-    Assert(stickyPackets.Length == packets.Sum(packet => packet.Length + sizeof(int)),
-        "Sticky decode should emit one complete length-prefixed packet list.");
-    AssertPacketSequence(packets, ParseStickyPackets(stickyPackets));
+    var packetBatch = DecodeBatchedEncodedPacket(encoded, decoder, decoded);
+    Assert(packetBatch.Length == packets.Sum(packet => packet.Length + sizeof(int)),
+        "Batch decode should emit one complete length-prefixed packet list.");
+    AssertPacketSequence(packets, ParsePacketRecords(packetBatch));
 }
 
-static async Task StickyPacketsRecoverMissingSourceSymbol()
+static async Task PacketBatchRecoversMissingSourceSymbol()
 {
     var options = new LinkerFecOptions
     {
@@ -739,7 +739,7 @@ static async Task StickyPacketsRecoverMissingSourceSymbol()
         DeterministicBytes(56)
     };
 
-    using var encoder = new StickyPacketEncoder(maxRemaining: 16 * 1024, options);
+    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
 
     foreach (var packet in packets)
     {
@@ -755,11 +755,11 @@ static async Task StickyPacketsRecoverMissingSourceSymbol()
         .Select(symbol => symbol.ToArray())
         .ToArray();
 
-    var decodedPackets = DecodeStickyFrames(transmitted, options);
+    var decodedPackets = DecodeBatchedFrames(transmitted, options);
     AssertPacketSet(packets, decodedPackets);
 }
 
-static async Task StickyPacketsSplitAtFecBlockSize()
+static async Task PacketBatchSplitsAtFecBlockSize()
 {
     var options = new LinkerFecOptions
     {
@@ -775,7 +775,7 @@ static async Task StickyPacketsSplitAtFecBlockSize()
         DeterministicBytes(20)
     };
 
-    using var encoder = new StickyPacketEncoder(maxRemaining: 16 * 1024, options);
+    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
     using var decoder = new LinkerFecCodec(options);
     var decoded = new byte[options.MaxDecodeBufferSize];
 
@@ -785,17 +785,17 @@ static async Task StickyPacketsSplitAtFecBlockSize()
     }
 
     var firstEncoded = await encoder.ReadAsync();
-    Assert(encoder.LastRawBytes == 118, $"Expected first sticky batch to use 118 bytes, got {encoder.LastRawBytes}.");
-    var firstStickyPackets = ParseStickyPackets(DecodeStickyEncodedPacket(firstEncoded, decoder, decoded));
-    AssertPacketSequence(packets[..2], firstStickyPackets);
+    Assert(encoder.LastRawBytes == 118, $"Expected first batch to use 118 bytes, got {encoder.LastRawBytes}.");
+    var firstBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(firstEncoded, decoder, decoded));
+    AssertPacketSequence(packets[..2], firstBatchPackets);
 
     var secondEncoded = await encoder.ReadAsync();
-    Assert(encoder.LastRawBytes == 24, $"Expected second sticky batch to use 24 bytes, got {encoder.LastRawBytes}.");
-    var secondStickyPackets = ParseStickyPackets(DecodeStickyEncodedPacket(secondEncoded, decoder, decoded));
-    AssertPacketSequence(packets[2..], secondStickyPackets);
+    Assert(encoder.LastRawBytes == 24, $"Expected second batch to use 24 bytes, got {encoder.LastRawBytes}.");
+    var secondBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(secondEncoded, decoder, decoded));
+    AssertPacketSequence(packets[2..], secondBatchPackets);
 }
 
-static async Task StickyPacketsSplitAtSourcePacketCount()
+static async Task PacketBatchSplitsAtSourcePacketCount()
 {
     var options = new LinkerFecOptions
     {
@@ -808,7 +808,7 @@ static async Task StickyPacketsSplitAtSourcePacketCount()
         .Select(i => DeterministicBytes(64 + i % 2))
         .ToArray();
 
-    using var encoder = new StickyPacketEncoder(maxRemaining: 16 * 1024, options);
+    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
     using var decoder = new LinkerFecCodec(options);
     var decoded = new byte[options.MaxDecodeBufferSize];
 
@@ -819,22 +819,22 @@ static async Task StickyPacketsSplitAtSourcePacketCount()
 
     var firstEncoded = await encoder.ReadAsync();
     Assert(encoder.LastRawPacketCount == options.SourceSymbolsPerBlock,
-        $"Expected first sticky batch to contain {options.SourceSymbolsPerBlock} packets, got {encoder.LastRawPacketCount}.");
+        $"Expected first batch to contain {options.SourceSymbolsPerBlock} packets, got {encoder.LastRawPacketCount}.");
     Assert(encoder.LastEncodedFrameCount == options.SourceSymbolsPerBlock + options.RepairSymbolsPerBlock,
-        $"Expected sticky 10/2 to emit 12 FEC frames, got {encoder.LastEncodedFrameCount}.");
-    var firstStickyPackets = ParseStickyPackets(DecodeStickyEncodedPacket(firstEncoded, decoder, decoded));
-    AssertPacketSequence(packets[..options.SourceSymbolsPerBlock], firstStickyPackets);
+        $"Expected batch 10/2 to emit 12 FEC frames, got {encoder.LastEncodedFrameCount}.");
+    var firstBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(firstEncoded, decoder, decoded));
+    AssertPacketSequence(packets[..options.SourceSymbolsPerBlock], firstBatchPackets);
 
     var secondEncoded = await encoder.ReadAsync();
     Assert(encoder.LastRawPacketCount == options.SourceSymbolsPerBlock,
-        $"Expected second sticky batch to contain {options.SourceSymbolsPerBlock} packets, got {encoder.LastRawPacketCount}.");
+        $"Expected second batch to contain {options.SourceSymbolsPerBlock} packets, got {encoder.LastRawPacketCount}.");
     Assert(encoder.LastEncodedFrameCount == options.SourceSymbolsPerBlock + options.RepairSymbolsPerBlock,
-        $"Expected sticky 10/2 to emit 12 FEC frames, got {encoder.LastEncodedFrameCount}.");
-    var secondStickyPackets = ParseStickyPackets(DecodeStickyEncodedPacket(secondEncoded, decoder, decoded));
-    AssertPacketSequence(packets[options.SourceSymbolsPerBlock..], secondStickyPackets);
+        $"Expected batch 10/2 to emit 12 FEC frames, got {encoder.LastEncodedFrameCount}.");
+    var secondBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(secondEncoded, decoder, decoded));
+    AssertPacketSequence(packets[options.SourceSymbolsPerBlock..], secondBatchPackets);
 }
 
-static async Task StickyPacketsLargeBacklogRoundTrip()
+static async Task PacketBatchLargeBacklogRoundTrip()
 {
     var options = new LinkerFecOptions
     {
@@ -844,7 +844,7 @@ static async Task StickyPacketsLargeBacklogRoundTrip()
 
     const int packetCount = 10_000;
     const int packetLength = 64;
-    using var encoder = new StickyPacketEncoder(maxRemaining: 64 * 1024 * 1024, options);
+    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 64 * 1024 * 1024, options);
     using var decoder = new LinkerFecCodec(options);
     var decoded = new byte[options.MaxDecodeBufferSize];
 
@@ -857,17 +857,17 @@ static async Task StickyPacketsLargeBacklogRoundTrip()
     while (decodedPackets < packetCount)
     {
         var encoded = await encoder.ReadAsync();
-        Assert(!encoded.IsEmpty, "Sticky encoder completed before all backlog packets were encoded.");
+        Assert(!encoded.IsEmpty, "Packet batcher completed before all backlog packets were encoded.");
 
-        var stickyPackets = DecodeStickyEncodedPacket(encoded, decoder, decoded);
-        if (!stickyPackets.IsEmpty)
+        var packetBatch = DecodeBatchedEncodedPacket(encoded, decoder, decoded);
+        if (!packetBatch.IsEmpty)
         {
-            var packets = ParseStickyPackets(stickyPackets);
+            var packets = ParsePacketRecords(packetBatch);
             decodedPackets += packets.Count;
         }
     }
 
-    Assert(decodedPackets == packetCount, $"Expected {packetCount} decoded sticky packets, got {decodedPackets}.");
+    Assert(decodedPackets == packetCount, $"Expected {packetCount} decoded batched packets, got {decodedPackets}.");
 }
 
 static Task EmptyInputRoundTrip()
@@ -1037,7 +1037,7 @@ static void AddLengthPrefixedFrames(ReadOnlySpan<byte> packet, List<byte[]> fram
     }
 }
 
-static ReadOnlyMemory<byte> DecodeStickyEncodedPacket(
+static ReadOnlyMemory<byte> DecodeBatchedEncodedPacket(
     ReadOnlyMemory<byte> encodedPacket,
     LinkerFecCodec decoder,
     byte[] decoded)
@@ -1047,11 +1047,11 @@ static ReadOnlyMemory<byte> DecodeStickyEncodedPacket(
     var offset = 0;
     while (offset < span.Length)
     {
-        Assert(span.Length - offset >= sizeof(int), "Sticky encoded packet ended inside a frame length prefix.");
+        Assert(span.Length - offset >= sizeof(int), "Batched encoded packet ended inside a frame length prefix.");
         var frameLength = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(offset, sizeof(int)));
         offset += sizeof(int);
         Assert(frameLength > 0 && frameLength <= span.Length - offset,
-            $"Invalid sticky FEC frame length {frameLength} at offset {offset}.");
+            $"Invalid batched FEC frame length {frameLength} at offset {offset}.");
 
         if (decoder.TryDecodeFrame(span.Slice(offset, frameLength), decoded.AsSpan(), out var decodedLength))
         {
@@ -1064,7 +1064,7 @@ static ReadOnlyMemory<byte> DecodeStickyEncodedPacket(
     return output.ToArray();
 }
 
-static List<byte[]> DecodeStickyFrames(IEnumerable<byte[]> frames, LinkerFecOptions options)
+static List<byte[]> DecodeBatchedFrames(IEnumerable<byte[]> frames, LinkerFecOptions options)
 {
     var decodedPackets = new List<byte[]>();
     var decoded = new byte[options.MaxDecodeBufferSize];
@@ -1074,7 +1074,7 @@ static List<byte[]> DecodeStickyFrames(IEnumerable<byte[]> frames, LinkerFecOpti
     {
         if (decoder.TryDecodeFrame(frame.AsSpan(), decoded.AsSpan(), out var decodedLength))
         {
-            decodedPackets.AddRange(ParseStickyPackets(decoded.AsMemory(0, decodedLength)));
+            decodedPackets.AddRange(ParsePacketRecords(decoded.AsMemory(0, decodedLength)));
         }
     }
 
@@ -1134,7 +1134,7 @@ static List<byte[]> DecodePacketFrames(IEnumerable<byte[]> frames, LinkerFecOpti
         {
             if (decoder.TryDecodeFrame(frame.AsSpan(), dst.AsSpan(), out var length))
             {
-                decoded.AddRange(ParseStickyPackets(dst.AsMemory(0, length)));
+                decoded.AddRange(ParsePacketRecords(dst.AsMemory(0, length)));
             }
         }
     }
@@ -1226,19 +1226,19 @@ static void AssertPacketSet(IReadOnlyList<byte[]> expected, IReadOnlyList<byte[]
     }
 }
 
-static List<byte[]> ParseStickyPackets(ReadOnlyMemory<byte> stickyPackets)
+static List<byte[]> ParsePacketRecords(ReadOnlyMemory<byte> packetBatch)
 {
     var packets = new List<byte[]>();
-    var span = stickyPackets.Span;
+    var span = packetBatch.Span;
     var offset = 0;
 
     while (offset < span.Length)
     {
-        Assert(span.Length - offset >= sizeof(int), "Sticky packet batch ended inside a length prefix.");
+        Assert(span.Length - offset >= sizeof(int), "Packet record list ended inside a length prefix.");
         var packetLength = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(offset, sizeof(int)));
         offset += sizeof(int);
-        Assert(packetLength >= 0, "Sticky packet length cannot be negative.");
-        Assert(packetLength <= span.Length - offset, "Sticky packet batch ended inside a packet payload.");
+        Assert(packetLength >= 0, "Batched packet length cannot be negative.");
+        Assert(packetLength <= span.Length - offset, "Packet record list ended inside a packet payload.");
 
         packets.Add(span.Slice(offset, packetLength).ToArray());
         offset += packetLength;
@@ -1473,7 +1473,7 @@ static long RunLossSweepTrial(
         }
 
         var expected = packets[nextExpectedPacket];
-        var decodedPackets = ParseStickyPackets(destination.AsMemory(0, decodedLength));
+        var decodedPackets = ParsePacketRecords(destination.AsMemory(0, decodedLength));
         if (decodedPackets.Count != 1)
         {
             throw new InvalidOperationException(
@@ -1639,7 +1639,7 @@ static void RunRandomRoundTripStress(long iterations)
                     throw new InvalidOperationException($"Decoded record mismatch at packet {i:N0}.");
                 }
 
-                var decodedPackets = ParseStickyPackets(decoded.AsMemory(0, decodedLength));
+                var decodedPackets = ParsePacketRecords(decoded.AsMemory(0, decodedLength));
                 if (decodedPackets.Count != 1 || !rawPacket.SequenceEqual(decodedPackets[0]))
                 {
                     throw new InvalidOperationException($"Decoded payload mismatch at packet {i:N0}.");

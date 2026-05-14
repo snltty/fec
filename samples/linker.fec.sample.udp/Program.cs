@@ -1,4 +1,4 @@
-﻿using System.Buffers.Binary;
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -28,13 +28,13 @@ namespace linker.fec.sample.udp
         }
         static async void RunClient(bool fec, IPEndPoint ep)
         {
-            StickyPacketEncoder linkerFecCodec = new StickyPacketEncoder(256 * 1024, new LinkerFecOptions
+            LinkerFecPacketBatcher packetBatcher = new LinkerFecPacketBatcher(256 * 1024, new LinkerFecOptions
             {
                 SourceSymbolsPerBlock = 10,
                 RepairSymbolsPerBlock = 2,
                 SymbolSize = 1433,
             });
-            byte[] encodeBuffer = new byte[linkerFecCodec.Options.MaxEncodeBufferSize];
+            byte[] encodeBuffer = new byte[packetBatcher.Options.MaxEncodeBufferSize];
             UdpClient udp = new UdpClient();
             udp.Connect(ep);
 
@@ -42,7 +42,7 @@ namespace linker.fec.sample.udp
             {
                 while (true)
                 {
-                    var memory = await linkerFecCodec.ReadAsync().ConfigureAwait(false);
+                        var memory = await packetBatcher.ReadAsync().ConfigureAwait(false);
                     do
                     {
                         var frameLength = BinaryPrimitives.ReadInt32LittleEndian(memory.Span);
@@ -56,14 +56,14 @@ namespace linker.fec.sample.udp
                 }
             });
 
-            int row = 5, col = 20;
+            int row = 10, col = 10;
             string[] array = new string[row * col];
             for (int index = 0; index < row * col; index++)
             {
                 {
                     if (fec)
                     {
-                        await linkerFecCodec.WriteAsync(Encoding.UTF8.GetBytes($"{index}")).ConfigureAwait(false);
+                        await packetBatcher.WriteAsync(Encoding.UTF8.GetBytes($"{index}")).ConfigureAwait(false);
                     }
                     else
                     {

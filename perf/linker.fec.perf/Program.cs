@@ -31,7 +31,7 @@ var config = ManualConfig
 _ = BenchmarkRunner.Run<FecHotPathBenchmarks>(config);
 
 BenchmarkResultReporter.PrintLatest();
-await StickyBandwidthReporter.PrintAsync().ConfigureAwait(false);
+await BatchBandwidthReporter.PrintAsync().ConfigureAwait(false);
 
 public class FecHotPathBenchmarks
 {
@@ -431,10 +431,10 @@ internal static class BenchmarkResultReporter
         string Gen2);
 }
 
-internal static class StickyBandwidthReporter
+internal static class BatchBandwidthReporter
 {
-    private const int StickyPacketCount = 100_000;
-    private const int StickyMaxRemaining = 4 * 1024 * 1024;
+    private const int BatchPacketCount = 100_000;
+    private const int BatchMaxRemaining = 4 * 1024 * 1024;
     private static readonly int[] PacketLengths = [64, 128, 256, 512, 1024, 1400];
 
     public static async Task PrintAsync()
@@ -445,9 +445,9 @@ internal static class StickyBandwidthReporter
             RepairSymbolsPerBlock = 2
         };
 
-        Console.WriteLine("## 小包合并 encode/decode");
+        Console.WriteLine("## 包批处理 encode/decode");
         Console.WriteLine();
-        Console.WriteLine($"源包: {StickyPacketCount:N0}, 配置: 10/2, packet: 64/128/256/512/1024/1400 bytes");
+        Console.WriteLine($"源包: {BatchPacketCount:N0}, 配置: 10/2, packet: 64/128/256/512/1024/1400 bytes");
         Console.WriteLine("带宽比只统计网络发送的 FEC frame 字节，不包含本地 4-byte frame length 前缀。");
         Console.WriteLine("source frame = 13B header + payload；repair frame = 13B header + 2B length symbol + trimmed repair payload。");
         Console.WriteLine();
@@ -456,46 +456,46 @@ internal static class StickyBandwidthReporter
 
         foreach (var packetLength in PacketLengths)
         {
-            var packets = CreatePackets(StickyPacketCount, packetLength, 0x5354_4943_4B59_0000UL + (uint)packetLength);
-            var encoded = await EncodeStickyPacketsAsync(packets, options).ConfigureAwait(false);
-            var decoded = DecodeStickyPackets(encoded.EncodedPackets, options, packetLength);
-            if (decoded.PacketCount != StickyPacketCount)
+            var packets = CreatePackets(BatchPacketCount, packetLength, 0x4241_5443_4800_0000UL + (uint)packetLength);
+            var encoded = await EncodePacketBatchesAsync(packets, options).ConfigureAwait(false);
+            var decoded = DecodePacketBatches(encoded.EncodedPackets, options, packetLength);
+            if (decoded.PacketCount != BatchPacketCount)
             {
                 throw new InvalidOperationException(
-                    $"Sticky decoded packet count mismatch: expected {StickyPacketCount}, got {decoded.PacketCount}.");
+                    $"Batch decoded packet count mismatch: expected {BatchPacketCount}, got {decoded.PacketCount}.");
             }
 
-            PrintStickyRow("Encode", packetLength, encoded.Stats);
-            PrintStickyRow("Decode", packetLength, encoded.Stats with { PacketCount = decoded.PacketCount });
+            PrintBatchRow("Encode", packetLength, encoded.Stats);
+            PrintBatchRow("Decode", packetLength, encoded.Stats with { PacketCount = decoded.PacketCount });
         }
 
         Console.WriteLine();
     }
 
-    private static async Task<StickyEncodedData> EncodeStickyPacketsAsync(
+    private static async Task<BatchEncodedData> EncodePacketBatchesAsync(
         IReadOnlyList<byte[]> packets,
         LinkerFecOptions options)
     {
         var encodedPackets = new List<byte[]>();
-        var expectedStickyBytes = packets.Sum(static packet => packet.Length + sizeof(int));
+        var expectedBatchBytes = packets.Sum(static packet => packet.Length + sizeof(int));
         var appBytes = 0L;
-        var stickyBytes = 0L;
+        var batchBytes = 0L;
         var encodedBytes = 0L;
         var fecFrameCount = 0;
         var checksum = 0;
 
-        using var encoder = new StickyPacketEncoder(StickyMaxRemaining, options);
+        using var encoder = new LinkerFecPacketBatcher(BatchMaxRemaining, options);
         var consumer = Task.Run(async () =>
         {
-            while (stickyBytes < expectedStickyBytes)
+            while (batchBytes < expectedBatchBytes)
             {
                 var encoded = await encoder.ReadAsync().ConfigureAwait(false);
                 if (encoded.IsEmpty)
                 {
-                    throw new InvalidOperationException("Sticky encoder completed before all packets were encoded.");
+                    throw new InvalidOperationException("Packet batcher completed before all packets were encoded.");
                 }
 
-                stickyBytes += encoder.LastRawBytes;
+                batchBytes += encoder.LastRawBytes;
                 fecFrameCount += encoder.LastEncodedFrameCount;
                 encodedBytes += CountNetworkFrameBytes(encoded.Span);
                 checksum ^= encoded.Span[0];
@@ -513,18 +513,18 @@ internal static class StickyBandwidthReporter
         encoder.Complete();
         await consumer.ConfigureAwait(false);
 
-        if (stickyBytes != expectedStickyBytes)
+        if (batchBytes != expectedBatchBytes)
         {
-            throw new InvalidOperationException("Sticky encoder consumed an unexpected number of record bytes.");
+            throw new InvalidOperationException("Packet batcher consumed an unexpected number of record bytes.");
         }
 
         Consume(checksum);
-        return new StickyEncodedData(
+        return new BatchEncodedData(
             encodedPackets.ToArray(),
-            new StickyStats(packets.Count, fecFrameCount, appBytes, encodedBytes));
+            new BatchStats(packets.Count, fecFrameCount, appBytes, encodedBytes));
     }
 
-    private static StickyStats DecodeStickyPackets(
+    private static BatchStats DecodePacketBatches(
         IReadOnlyList<byte[]> encodedPackets,
         LinkerFecOptions options,
         int expectedPacketLength)
@@ -542,19 +542,19 @@ internal static class StickyBandwidthReporter
             {
                 if (encodedPacket.Length - offset < sizeof(int))
                 {
-                    throw new InvalidOperationException("Sticky encoded packet ended inside a frame length prefix.");
+                    throw new InvalidOperationException("Batched encoded packet ended inside a frame length prefix.");
                 }
 
                 var frameLength = BinaryPrimitives.ReadInt32LittleEndian(encodedPacket.AsSpan(offset, sizeof(int)));
                 offset += sizeof(int);
                 if (frameLength <= 0 || frameLength > encodedPacket.Length - offset)
                 {
-                    throw new InvalidOperationException($"Invalid sticky FEC frame length {frameLength}.");
+                    throw new InvalidOperationException($"Invalid batched FEC frame length {frameLength}.");
                 }
 
                 if (decoder.TryDecodeFrame(encodedPacket.AsSpan(offset, frameLength), decoded.AsSpan(), out var decodedLength, out var decodedPacketCount))
                 {
-                    CountStickyRecords(
+                    CountBatchRecords(
                         decoded.AsSpan(0, decodedLength),
                         decodedPacketCount,
                         expectedPacketLength,
@@ -568,10 +568,10 @@ internal static class StickyBandwidthReporter
         }
 
         Consume(checksum);
-        return new StickyStats(packetCount, 0, appBytes, 0);
+        return new BatchStats(packetCount, 0, appBytes, 0);
     }
 
-    private static void CountStickyRecords(
+    private static void CountBatchRecords(
         ReadOnlySpan<byte> records,
         int decodedPacketCount,
         int expectedPacketLength,
@@ -583,14 +583,14 @@ internal static class StickyBandwidthReporter
         {
             if (records.Length < sizeof(int))
             {
-                throw new InvalidOperationException("Sticky record list ended inside a length prefix.");
+                throw new InvalidOperationException("Batched record list ended inside a length prefix.");
             }
 
             var packetLength = BinaryPrimitives.ReadInt32LittleEndian(records[..sizeof(int)]);
             records = records[sizeof(int)..];
             if (packetLength != expectedPacketLength || packetLength > records.Length)
             {
-                throw new InvalidOperationException($"Invalid sticky packet length {packetLength}.");
+                throw new InvalidOperationException($"Invalid batched packet length {packetLength}.");
             }
 
             checksum ^= records[0];
@@ -639,7 +639,7 @@ internal static class StickyBandwidthReporter
         return packets;
     }
 
-    private static void PrintStickyRow(string operation, int packetLength, StickyStats stats)
+    private static void PrintBatchRow(string operation, int packetLength, BatchStats stats)
     {
         Console.WriteLine(
             $"| {operation} 10/2 {packetLength}B | {stats.PacketCount:N0} | {stats.FecFrameCount:N0} | " +
@@ -654,9 +654,9 @@ internal static class StickyBandwidthReporter
         }
     }
 
-    private sealed record StickyEncodedData(byte[][] EncodedPackets, StickyStats Stats);
+    private sealed record BatchEncodedData(byte[][] EncodedPackets, BatchStats Stats);
 
-    private readonly record struct StickyStats(
+    private readonly record struct BatchStats(
         int PacketCount,
         int FecFrameCount,
         long AppBytes,

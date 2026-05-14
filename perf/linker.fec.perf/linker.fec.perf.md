@@ -10,7 +10,7 @@
     1. 用BenchmarkDotNet
     2. 包长：分别 64B/128B/256B/512B/1024B/1400B
     3. 输出结果：操作/包长/平均耗时/吞吐/分配/Gen0/Gen1/Gen2
-3. 测试小包合并encode decode，要求如下，主要看带宽开销
+3. 测试包批处理encode decode，要求如下，主要看带宽开销
     1. 只统计带宽比，不必使用BenchmarkDotNet
     2. 配置：sourceSymbolsPerBlock/repairSymbolsPerBlock 10/2
     3. 包长：分别 64B/128B/256B/512B/1024B/1400B
