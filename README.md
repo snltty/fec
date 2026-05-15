@@ -47,19 +47,27 @@ new LinkerFecOptions
 
 代码在`samples/linker.fec.sample.udp`，以下表格中 : ❌丢失、💚FEC算法恢复、其它正常
 
-
 #### 1、局域网内
 
-服务端双向丢包 `iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP` + `iptables -A OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP`
+服务端双向丢包
+```
+iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP
+iptables -A OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP
+```
 
-删除丢包规则 `iptables -D INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP` + `iptables -D OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP`
+删除丢包规则 
+```
+iptables -D INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DRO
+iptables -D OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP
+```
 
 
 ##### 1. UDP
 
-服务端 `linker.fec.sample.udp.exe server ep0.0.0.0:12345`
-
-客户端 `linker.fec.sample.udp.exe client ep192.168.1.3:12345`
+```
+linker.fec.sample.udp.exe server ep0.0.0.0:12345
+linker.fec.sample.udp.exe client ep192.168.1.3:12345
+```
 
 |0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -76,9 +84,10 @@ new LinkerFecOptions
 
 ##### 2. UDP + FEC
 
-服务端 `linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec`
-
-客户端 `linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec`
+```
+linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec
+linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec
+```
 
 |0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
 |---|---|---|---|---|---|---|---|---|---|
