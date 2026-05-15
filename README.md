@@ -14,9 +14,9 @@ new LinkerFecOptions
 
 | source | repair | 输出 |
 |---:|---:|---|
-| 1 | 2 | `1 source frame + 2 repair frame` |
-| 5 | 2 | `5 source frame + 2 repair frame` |
-| 10 | 2 | `10 source frame + 2 repair frame` |
+| 1 | 2 | 1 source frame + 2 repair frame |
+| 5 | 2 | 5 source frame + 2 repair frame |
+| 10 | 2 | 10 source frame + 2 repair frame |
 
 #### 策略冗余
 
@@ -45,7 +45,7 @@ new LinkerFecOptions
 
 服务端参数 `server ep0.0.0.0:12345` / `server ep0.0.0.0:12345 fec`
 
-客户端参数 `server ep0.0.0.0:12345` / `server ep0.0.0.0:12345 fec`
+客户端参数 `client ep192.168.1.3:12345` / `client ep192.168.1.3:12345 fec`
 
 以下结果中 ❌丢失、💚FEC算法恢复、其它正常
 
