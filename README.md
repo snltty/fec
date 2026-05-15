@@ -1,12 +1,10 @@
-# 1、linker.fec
+# 1、项目说明
 
 这是一个零分配、高性能面向UDP实时传输的前向纠错（FEC）库。它把原始业务包编码成系统源帧和修复帧，接收端在部分 FEC 帧丢失时仍可恢复原始数据，用来降低UDP丢包对业务层的影响。
 
 ## 2、冗余配置
 
-`LinkerFecCodec.TryEncodePacket` 和 `LinkerFecStreamingEncoder.TryEncodePacket` 的输入都是 `[4-byte length][payload]...` record list，可以一次输入多个业务包。解码输出也保持同样格式；Streaming encoder 会按 record 立即输出 source frame，但网络 FEC frame 只携带 payload，不携带本地 4 字节 record 前缀。
-
-### 1、固定冗余
+#### 1、固定冗余
 
 ```csharp
 new LinkerFecOptions
@@ -22,7 +20,7 @@ new LinkerFecOptions
 | 5 | 2 | `5 source frame + 2 repair frame` |
 | 10 | 2 | `10 source frame + 2 repair frame` |
 
-### 2、策略冗余
+#### 2、策略冗余
 
 ```csharp
 new LinkerFecOptions
@@ -37,7 +35,7 @@ new LinkerFecOptions
 };
 ```
 
-推荐配置：
+推荐配置
 
 | 场景 | 推荐 profile | 说明 |
 |---|---|---|
@@ -53,14 +51,14 @@ new LinkerFecOptions
 
 客户端 `linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec`
 
-### 1、局域网内
+#### 1、局域网内
 
 服务端 `iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP`
 服务端 `iptables -D INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP`
 服务端 `iptables -A OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP`
 服务端 `iptables -D OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP`
 
-#### 1. UDP
+##### 1. UDP
 
 |0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -75,7 +73,7 @@ new LinkerFecOptions
 |❌|81|82|83|84|85|❌|87|88|89|
 |❌|91|92|93|94|❌|96|97|98|99|
 
-#### 2. UDP + FEC
+##### 2. UDP + FEC
 
 |0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -95,7 +93,7 @@ new LinkerFecOptions
 
 测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、I9 9900KF、32GB
 
-### 独立性能 encode/decode 
+#### 独立性能 encode/decode 
 
 | 操作 | 包长 | 平均耗时 | 吞吐 | 分配 | Gen0 | Gen1 | Gen2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -112,7 +110,7 @@ new LinkerFecOptions
 | Encode | 1400B | 61.00 ns/op | 183.61 Gbps | 0 B/op | 0 | 0 | 0 |
 | Decode | 1400B | 36.11 ns/op | 310.16 Gbps | 0 B/op | 0 | 0 | 0 |
 
-### 整体性能 encode/decode 
+#### 整体性能 encode/decode 
 
 | 操作 | 包长 | 平均耗时 | 吞吐 | 分配 | Gen0 | Gen1 | Gen2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
