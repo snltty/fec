@@ -31,8 +31,14 @@ var tests = new (string Name, Func<Task> Body)[]
     ("fec recovered packet count tracks only repair recoveries", FecRecoveredPacketCountTracksOnlyRepairRecoveries),
     ("decoded packet kinds track each output record", DecodedPacketKindsTrackEachOutputRecord),
     ("record length prefix does not consume symbol capacity", RecordLengthPrefixDoesNotConsumeSymbolCapacity),
-    ("partial source count scales repair symbols", PartialSourceCountScalesRepairSymbols),
-    ("single source ratio emits multiple repair symbols", SingleSourceRatioEmitsMultipleRepairSymbols),
+    ("repair profile chooses absolute repair symbols", RepairProfileChoosesAbsoluteRepairSymbols),
+    ("repair profile interpolates missing source counts", RepairProfileInterpolatesMissingSourceCounts),
+    ("streaming encoder sends source immediately and repairs on full block", StreamingEncoderSendsSourceImmediatelyAndRepairsOnFullBlock),
+    ("streaming encoder accepts length-prefixed record lists", StreamingEncoderAcceptsLengthPrefixedRecordLists),
+    ("streaming encoder flushes pending repairs", StreamingEncoderFlushesPendingRepairs),
+    ("streaming encoder flushes repairs after timeout", StreamingEncoderFlushesRepairsAfterTimeout),
+    ("streaming decoder suppresses repair duplicate after immediate source", StreamingDecoderSuppressesRepairDuplicateAfterImmediateSource),
+    ("single source profile emits multiple repair symbols", SingleSourceProfileEmitsMultipleRepairSymbols),
     ("single source repair frame is trimmed", SingleSourceRepairFrameIsTrimmed),
     ("intermediate repair generation matches direct repair", IntermediateRepairGenerationMatchesDirectRepair),
     ("payload-length header keeps 1400 byte frames self-delimiting", PayloadLengthHeaderKeeps1400ByteFramesSelfDelimiting),
@@ -42,12 +48,6 @@ var tests = new (string Name, Func<Task> Body)[]
     ("serialized frames round trip", SerializedFramesRoundTrip),
     ("corrupt frame is rejected", CorruptFrameIsRejected),
     ("too much loss emits only received source data", TooMuchLossDoesNotEmitRecoveredData),
-    ("batched packets round trip", PacketBatchRoundTrip),
-    ("batched packets decode to length-prefixed list", PacketBatchDecodesToLengthPrefixedList),
-    ("batched packets recover missing source symbol", PacketBatchRecoversMissingSourceSymbol),
-    ("batched packets split at fec block size", PacketBatchSplitsAtFecBlockSize),
-    ("batched packets split at source packet count", PacketBatchSplitsAtSourcePacketCount),
-    ("batched packets large backlog round trip", PacketBatchLargeBacklogRoundTrip),
     ("empty input round trip", EmptyInputRoundTrip),
     ("invalid application records are rejected", InvalidApplicationRecordsAreRejected),
     ("invalid options are rejected", InvalidOptionsAreRejected)
@@ -409,12 +409,12 @@ static Task RecordLengthPrefixDoesNotConsumeSymbolCapacity()
     Assert(frames[2].Length == LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + options.SymbolSize,
         "Repair frame should contain length metadata plus the encoded payload bytes.");
 
-    var decodedPackets = DecodeBatchedFrames(frames, options);
+    var decodedPackets = DecodePacketFrames(frames, options);
     AssertPacketSequence(packets, decodedPackets);
     return Task.CompletedTask;
 }
 
-static Task PartialSourceCountScalesRepairSymbols()
+static Task RepairProfileChoosesAbsoluteRepairSymbols()
 {
     var options = new LinkerFecOptions
     {
@@ -423,15 +423,15 @@ static Task PartialSourceCountScalesRepairSymbols()
         RepairSymbolsPerBlock = 4
     };
 
-    Assert(options.GetRepairSymbolsForSourceCount(1) == 1, "Expected 10/4 to use one repair for one source by default.");
-    Assert(options.GetRepairSymbolsForSourceCount(3) == 2, "Expected 10/4 to use two repairs for three sources.");
+    Assert(options.GetRepairSymbolsForSourceCount(1) == 4, "Expected 10/4 to use four repairs for one source by default.");
+    Assert(options.GetRepairSymbolsForSourceCount(3) == 4, "Expected 10/4 to use four repairs for three sources.");
     Assert(options.GetRepairSymbolsForSourceCount(10) == 4, "Expected 10/4 to use four repairs for a full source block.");
 
     var singleRecord = CreatePacketRecord(DeterministicBytes(17));
     var singleFrames = EncodeRecordListToFrames(singleRecord, options);
-    Assert(singleFrames.Count == 2, $"Expected 1 source + 1 repair, got {singleFrames.Count} frames.");
-    Assert(singleFrames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 1,
-        "Expected exactly one repair frame for one source.");
+    Assert(singleFrames.Count == 5, $"Expected 1 source + 4 repair, got {singleFrames.Count} frames.");
+    Assert(singleFrames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 4,
+        "Expected exactly four repair frames for one source.");
 
     var threeRecords = CreatePacketRecords([
         DeterministicBytes(17),
@@ -439,14 +439,246 @@ static Task PartialSourceCountScalesRepairSymbols()
         DeterministicBytes(23)
     ]);
     var threeFrames = EncodeRecordListToFrames(threeRecords, options);
-    Assert(threeFrames.Count == 5, $"Expected 3 source + 2 repair, got {threeFrames.Count} frames.");
-    Assert(threeFrames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 2,
-        "Expected exactly two repair frames for three sources.");
+    Assert(threeFrames.Count == 7, $"Expected 3 source + 4 repair, got {threeFrames.Count} frames.");
+    Assert(threeFrames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 4,
+        "Expected exactly four repair frames for three sources.");
 
     return Task.CompletedTask;
 }
 
-static Task SingleSourceRatioEmitsMultipleRepairSymbols()
+static Task RepairProfileInterpolatesMissingSourceCounts()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 10,
+        RepairSymbolsPerBlock = 1,
+        RepairProfile = [
+            new LinkerFecRepairProfilePoint(1, 2),
+            new LinkerFecRepairProfilePoint(10, 4)
+        ]
+    };
+
+    Assert(options.GetRepairSymbolsForSourceCount(1) == 2, "Expected profile 1:2 to use two repairs for one source.");
+    Assert(options.GetRepairSymbolsForSourceCount(5) == 3, "Expected profile interpolation to use three repairs for five sources.");
+    Assert(options.GetRepairSymbolsForSourceCount(10) == 4, "Expected profile 10:4 to use four repairs for ten sources.");
+
+    var records = CreatePacketRecords(Enumerable.Range(0, 5).Select(i => DeterministicBytes(17 + i)).ToArray());
+    var frames = EncodeRecordListToFrames(records, options);
+    Assert(frames.Count == 8, $"Expected 5 source + 3 repair, got {frames.Count} frames.");
+    Assert(frames.Count(frame => LinkerFecEncodedSymbol.Parse(frame, options).IsRepair) == 3,
+        "Expected exactly three repair frames for five sources.");
+    return Task.CompletedTask;
+}
+
+static Task StreamingEncoderSendsSourceImmediatelyAndRepairsOnFullBlock()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 3,
+        RepairSymbolsPerBlock = 2
+    };
+
+    using var encoder = new LinkerFecStreamingEncoder(options);
+    var encoded = new byte[encoder.MaxOutputBufferSize];
+    var allFrames = new List<byte[]>();
+    for (var i = 0; i < options.SourceSymbolsPerBlock; i++)
+    {
+        var bytesWritten = encoder.EncodePacket(CreatePacketRecord(DeterministicBytes(17 + i)), encoded.AsSpan(), out var packetCount);
+        AddLengthPrefixedFrames(encoded.AsSpan(0, bytesWritten), allFrames);
+        Assert(packetCount == (i == options.SourceSymbolsPerBlock - 1 ? 3 : 1),
+            $"Unexpected streaming packet count at index {i}: {packetCount}.");
+    }
+
+    Assert(allFrames.Count == 5, $"Expected 3 immediate source + 2 repair frames, got {allFrames.Count}.");
+    Assert(LinkerFecEncodedSymbol.Parse(allFrames[0], options).SourceSymbolCount == 0, "Streaming source frame should not require final source count.");
+    Assert(LinkerFecEncodedSymbol.Parse(allFrames[3], options).SourceSymbolCount == 3, "Repair frame should finalize source count.");
+
+    var transmitted = allFrames.Where((_, index) => index != 1).ToArray();
+    var decodedPackets = DecodePacketFrames(transmitted, options);
+    AssertPacketSequence([
+        DeterministicBytes(17),
+        DeterministicBytes(19),
+        DeterministicBytes(18)
+    ], decodedPackets);
+    return Task.CompletedTask;
+}
+
+static Task StreamingEncoderAcceptsLengthPrefixedRecordLists()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 3,
+        RepairSymbolsPerBlock = 2
+    };
+
+    var packets = new[]
+    {
+        DeterministicBytes(17),
+        DeterministicBytes(18),
+        DeterministicBytes(19)
+    };
+    var records = CreatePacketRecords(packets);
+    using var encoder = new LinkerFecStreamingEncoder(options);
+    var encoded = new byte[encoder.MaxOutputBufferSize];
+    var bytesWritten = encoder.EncodePacket(records, encoded.AsSpan(), out var packetCount);
+
+    var frames = new List<byte[]>();
+    AddLengthPrefixedFrames(encoded.AsSpan(0, bytesWritten), frames);
+    Assert(packetCount == 5, $"Expected 3 source + 2 repair frames, got {packetCount}.");
+    Assert(frames.Count == 5, $"Expected 5 streaming frames, got {frames.Count}.");
+    for (var i = 0; i < packets.Length; i++)
+    {
+        var symbol = LinkerFecEncodedSymbol.Parse(frames[i], options);
+        Assert(!symbol.IsRepair, "Expected input records to become source frames first.");
+        Assert(symbol.Payload.Length == packets[i].Length, "Streaming source frame should carry payload without the 4-byte record prefix.");
+    }
+
+    var transmitted = frames.Where((_, index) => index != 1).ToArray();
+    var decodedPackets = new List<byte[]>();
+    var decodeBuffer = new byte[options.MaxDecodeBufferSize];
+    using var decoder = new LinkerFecStreamingEncoder(options);
+    foreach (var frame in transmitted)
+    {
+        if (decoder.TryDecodeFrame(frame.AsSpan(), decodeBuffer.AsSpan(), out var decodedLength))
+        {
+            decodedPackets.AddRange(ParsePacketRecords(decodeBuffer.AsMemory(0, decodedLength)));
+        }
+    }
+
+    AssertPacketSequence([
+        packets[0],
+        packets[2],
+        packets[1]
+    ], decodedPackets);
+    return Task.CompletedTask;
+}
+
+static Task StreamingEncoderFlushesPendingRepairs()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 10,
+        RepairSymbolsPerBlock = 2
+    };
+
+    using var encoder = new LinkerFecStreamingEncoder(options);
+    var encoded = new byte[encoder.MaxOutputBufferSize];
+    var frames = new List<byte[]>();
+
+    var firstPacket = DeterministicBytes(23);
+    var firstLength = encoder.EncodePacket(CreatePacketRecord(firstPacket), encoded.AsSpan(), out var firstPacketCount);
+    AddLengthPrefixedFrames(encoded.AsSpan(0, firstLength), frames);
+    Assert(firstPacketCount == 1, $"Expected source-only output before flush, got {firstPacketCount} frames.");
+
+    Assert(encoder.TryFlushRepairs(encoded.AsSpan(), out var earlyFlushLength, out var earlyFlushPacketCount),
+        "Timeout-gated repair flush should be a no-op before the timeout.");
+    Assert(earlyFlushLength == 0 && earlyFlushPacketCount == 0, "Timeout-gated repair flush should not emit repairs before the timeout.");
+
+    Assert(encoder.TryForceFlushRepairs(encoded.AsSpan(), out var repairLength, out var repairPacketCount),
+        "Forced repair flush should fit in the max output buffer.");
+    AddLengthPrefixedFrames(encoded.AsSpan(0, repairLength), frames);
+    Assert(repairPacketCount == 2, $"Expected 10/2 profile to flush two repair frames for one pending source, got {repairPacketCount}.");
+
+    var repairedOnly = frames.Skip(1).Take(1).ToArray();
+    var decoded = DecodeFrames(repairedOnly, options);
+    AssertEqual(firstPacket, decoded);
+    return Task.CompletedTask;
+}
+
+static Task StreamingEncoderFlushesRepairsAfterTimeout()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 10,
+        RepairSymbolsPerBlock = 2
+    };
+
+    using var encoder = new LinkerFecStreamingEncoder(options, TimeSpan.Zero);
+    var encoded = new byte[encoder.MaxOutputBufferSize];
+    var packet = DeterministicBytes(29);
+    var sourceLength = encoder.EncodePacket(CreatePacketRecord(packet), encoded.AsSpan(), out var sourcePacketCount);
+    Assert(sourcePacketCount == 1, $"Expected source-only output before timeout flush, got {sourcePacketCount} frames.");
+    Assert(sourceLength == sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + 29, "Unexpected streaming source frame length.");
+
+    Assert(encoder.TryFlushRepairs(encoded.AsSpan(), out var repairLength, out var repairPacketCount),
+        "Expired repair flush should fit in the max output buffer.");
+    Assert(repairPacketCount == 2, $"Expected two timed-out repair frames, got {repairPacketCount}.");
+
+    var repairs = new List<byte[]>();
+    AddLengthPrefixedFrames(encoded.AsSpan(0, repairLength), repairs);
+    var decoded = DecodeFrames(repairs.Take(1), options);
+    AssertEqual(packet, decoded);
+    return Task.CompletedTask;
+}
+
+static Task StreamingDecoderSuppressesRepairDuplicateAfterImmediateSource()
+{
+    var options = new LinkerFecOptions
+    {
+        SymbolSize = 128,
+        SourceSymbolsPerBlock = 10,
+        RepairSymbolsPerBlock = 2
+    };
+
+    using var encoder = new LinkerFecStreamingEncoder(options, TimeSpan.Zero);
+    var encoded = new byte[encoder.MaxOutputBufferSize];
+    var frames = new List<byte[]>();
+    var packet = DeterministicBytes(29);
+
+    var sourceLength = encoder.EncodePacket(CreatePacketRecord(packet), encoded.AsSpan(), out var sourcePacketCount);
+    AddLengthPrefixedFrames(encoded.AsSpan(0, sourceLength), frames);
+    Assert(sourcePacketCount == 1, $"Expected one immediate source frame, got {sourcePacketCount}.");
+
+    Assert(encoder.TryFlushRepairs(encoded.AsSpan(), out var repairLength, out var repairPacketCount),
+        "Expired repair flush should fit in the max output buffer.");
+    AddLengthPrefixedFrames(encoded.AsSpan(0, repairLength), frames);
+    Assert(repairPacketCount == 2, $"Expected two repair frames, got {repairPacketCount}.");
+
+    using var decoder = new LinkerFecStreamingEncoder(options);
+    var decoded = new byte[options.MaxDecodeBufferSize];
+    var packetKinds = new LinkerFecDecodedPacketKind[options.SourceSymbolsPerBlock];
+    var decodedPackets = new List<byte[]>();
+    var sourceOutputs = 0;
+    var recoveredOutputs = 0;
+
+    foreach (var frame in frames)
+    {
+        if (!decoder.TryDecodeFrame(
+                frame.AsSpan(),
+                decoded.AsSpan(),
+                packetKinds.AsSpan(),
+                out var decodedLength,
+                out var decodedPacketCount))
+        {
+            continue;
+        }
+
+        decodedPackets.AddRange(ParsePacketRecords(decoded.AsMemory(0, decodedLength)));
+        for (var i = 0; i < decodedPacketCount; i++)
+        {
+            if (packetKinds[i] == LinkerFecDecodedPacketKind.Source)
+            {
+                sourceOutputs++;
+            }
+            else if (packetKinds[i] == LinkerFecDecodedPacketKind.Recovered)
+            {
+                recoveredOutputs++;
+            }
+        }
+    }
+
+    AssertPacketSequence([packet], decodedPackets);
+    Assert(sourceOutputs == 1, $"Expected one source output, got {sourceOutputs}.");
+    Assert(recoveredOutputs == 0, $"Expected no duplicate recovered output, got {recoveredOutputs}.");
+    return Task.CompletedTask;
+}
+
+static Task SingleSourceProfileEmitsMultipleRepairSymbols()
 {
     var options = new LinkerFecOptions
     {
@@ -709,229 +941,6 @@ static Task TooMuchLossDoesNotEmitRecoveredData()
     return Task.CompletedTask;
 }
 
-static async Task PacketBatchRoundTrip()
-{
-    var options = new LinkerFecOptions
-    {
-        SymbolSize = 128,
-        SourceSymbolsPerBlock = 4,
-        RepairSymbolsPerBlock = 2
-    };
-
-    var packets = new[]
-    {
-        DeterministicBytes(17),
-        DeterministicBytes(31),
-        DeterministicBytes(43)
-    };
-
-    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
-    using var decoder = new LinkerFecCodec(options);
-    var decoded = new byte[options.MaxDecodeBufferSize];
-
-    foreach (var packet in packets)
-    {
-        await encoder.WriteAsync(packet);
-    }
-
-    var encoded = await encoder.ReadAsync();
-    Assert(encoded.Length > 0, "Packet batcher did not emit encoded data.");
-    Assert(encoder.LastRawBytes == packets.Sum(packet => packet.Length + sizeof(int)), "Packet batcher did not batch the queued packets.");
-
-    var packetBatch = DecodeBatchedEncodedPacket(encoded, decoder, decoded);
-    Assert(!packetBatch.IsEmpty, "Batch decode did not emit a packet list.");
-    var decodedPackets = ParsePacketRecords(packetBatch);
-    AssertPacketSequence(packets, decodedPackets);
-}
-
-static async Task PacketBatchDecodesToLengthPrefixedList()
-{
-    var options = new LinkerFecOptions
-    {
-        SymbolSize = 128,
-        SourceSymbolsPerBlock = 10,
-        RepairSymbolsPerBlock = 2
-    };
-
-    var packets = new[]
-    {
-        DeterministicBytes(17),
-        DeterministicBytes(31),
-        DeterministicBytes(43),
-        DeterministicBytes(59),
-        DeterministicBytes(61),
-        DeterministicBytes(63)
-    };
-
-    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
-    using var decoder = new LinkerFecCodec(options);
-    var decoded = new byte[options.MaxDecodeBufferSize];
-
-    foreach (var packet in packets)
-    {
-        await encoder.WriteAsync(packet);
-    }
-
-    var encoded = await encoder.ReadAsync();
-    var expectedSourceFrames = packets.Length;
-    var expectedFrameCount = expectedSourceFrames + options.RepairSymbolsPerBlock;
-    Assert(encoder.LastEncodedFrameCount == expectedFrameCount,
-        $"Expected {expectedFrameCount} FEC frames for the packet batch, got {encoder.LastEncodedFrameCount}.");
-
-    var packetBatch = DecodeBatchedEncodedPacket(encoded, decoder, decoded);
-    Assert(packetBatch.Length == packets.Sum(packet => packet.Length + sizeof(int)),
-        "Batch decode should emit one complete length-prefixed packet list.");
-    AssertPacketSequence(packets, ParsePacketRecords(packetBatch));
-}
-
-static async Task PacketBatchRecoversMissingSourceSymbol()
-{
-    var options = new LinkerFecOptions
-    {
-        SymbolSize = 128,
-        SourceSymbolsPerBlock = 4,
-        RepairSymbolsPerBlock = 2
-    };
-
-    var packets = new[]
-    {
-        DeterministicBytes(50),
-        DeterministicBytes(52),
-        DeterministicBytes(54),
-        DeterministicBytes(56)
-    };
-
-    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
-
-    foreach (var packet in packets)
-    {
-        await encoder.WriteAsync(packet);
-    }
-
-    var encoded = await encoder.ReadAsync();
-    var frames = new List<byte[]>();
-    AddLengthPrefixedFrames(encoded.Span, frames);
-    var transmitted = frames
-        .Select(frame => LinkerFecEncodedSymbol.Parse(frame, options))
-        .Where(symbol => symbol.IsRepair || symbol.SymbolId != 1)
-        .Select(symbol => symbol.ToArray())
-        .ToArray();
-
-    var decodedPackets = DecodeBatchedFrames(transmitted, options);
-    AssertPacketSet(packets, decodedPackets);
-}
-
-static async Task PacketBatchSplitsAtFecBlockSize()
-{
-    var options = new LinkerFecOptions
-    {
-        SymbolSize = 64,
-        SourceSymbolsPerBlock = 2,
-        RepairSymbolsPerBlock = 1
-    };
-
-    var packets = new[]
-    {
-        DeterministicBytes(50),
-        DeterministicBytes(60),
-        DeterministicBytes(20)
-    };
-
-    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
-    using var decoder = new LinkerFecCodec(options);
-    var decoded = new byte[options.MaxDecodeBufferSize];
-
-    foreach (var packet in packets)
-    {
-        await encoder.WriteAsync(packet);
-    }
-
-    var firstEncoded = await encoder.ReadAsync();
-    Assert(encoder.LastRawBytes == 118, $"Expected first batch to use 118 bytes, got {encoder.LastRawBytes}.");
-    var firstBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(firstEncoded, decoder, decoded));
-    AssertPacketSequence(packets[..2], firstBatchPackets);
-
-    var secondEncoded = await encoder.ReadAsync();
-    Assert(encoder.LastRawBytes == 24, $"Expected second batch to use 24 bytes, got {encoder.LastRawBytes}.");
-    var secondBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(secondEncoded, decoder, decoded));
-    AssertPacketSequence(packets[2..], secondBatchPackets);
-}
-
-static async Task PacketBatchSplitsAtSourcePacketCount()
-{
-    var options = new LinkerFecOptions
-    {
-        SymbolSize = 1440,
-        SourceSymbolsPerBlock = 10,
-        RepairSymbolsPerBlock = 2
-    };
-
-    var packets = Enumerable.Range(0, 20)
-        .Select(i => DeterministicBytes(64 + i % 2))
-        .ToArray();
-
-    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 16 * 1024, options);
-    using var decoder = new LinkerFecCodec(options);
-    var decoded = new byte[options.MaxDecodeBufferSize];
-
-    foreach (var packet in packets)
-    {
-        await encoder.WriteAsync(packet);
-    }
-
-    var firstEncoded = await encoder.ReadAsync();
-    Assert(encoder.LastRawPacketCount == options.SourceSymbolsPerBlock,
-        $"Expected first batch to contain {options.SourceSymbolsPerBlock} packets, got {encoder.LastRawPacketCount}.");
-    Assert(encoder.LastEncodedFrameCount == options.SourceSymbolsPerBlock + options.RepairSymbolsPerBlock,
-        $"Expected batch 10/2 to emit 12 FEC frames, got {encoder.LastEncodedFrameCount}.");
-    var firstBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(firstEncoded, decoder, decoded));
-    AssertPacketSequence(packets[..options.SourceSymbolsPerBlock], firstBatchPackets);
-
-    var secondEncoded = await encoder.ReadAsync();
-    Assert(encoder.LastRawPacketCount == options.SourceSymbolsPerBlock,
-        $"Expected second batch to contain {options.SourceSymbolsPerBlock} packets, got {encoder.LastRawPacketCount}.");
-    Assert(encoder.LastEncodedFrameCount == options.SourceSymbolsPerBlock + options.RepairSymbolsPerBlock,
-        $"Expected batch 10/2 to emit 12 FEC frames, got {encoder.LastEncodedFrameCount}.");
-    var secondBatchPackets = ParsePacketRecords(DecodeBatchedEncodedPacket(secondEncoded, decoder, decoded));
-    AssertPacketSequence(packets[options.SourceSymbolsPerBlock..], secondBatchPackets);
-}
-
-static async Task PacketBatchLargeBacklogRoundTrip()
-{
-    var options = new LinkerFecOptions
-    {
-        SourceSymbolsPerBlock = 10,
-        RepairSymbolsPerBlock = 2
-    };
-
-    const int packetCount = 10_000;
-    const int packetLength = 64;
-    using var encoder = new LinkerFecPacketBatcher(maxRemaining: 64 * 1024 * 1024, options);
-    using var decoder = new LinkerFecCodec(options);
-    var decoded = new byte[options.MaxDecodeBufferSize];
-
-    for (var i = 0; i < packetCount; i++)
-    {
-        await encoder.WriteAsync(DeterministicBytes(packetLength + i % 3));
-    }
-
-    var decodedPackets = 0;
-    while (decodedPackets < packetCount)
-    {
-        var encoded = await encoder.ReadAsync();
-        Assert(!encoded.IsEmpty, "Packet batcher completed before all backlog packets were encoded.");
-
-        var packetBatch = DecodeBatchedEncodedPacket(encoded, decoder, decoded);
-        if (!packetBatch.IsEmpty)
-        {
-            var packets = ParsePacketRecords(packetBatch);
-            decodedPackets += packets.Count;
-        }
-    }
-
-    Assert(decodedPackets == packetCount, $"Expected {packetCount} decoded batched packets, got {decodedPackets}.");
-}
-
 static Task EmptyInputRoundTrip()
 {
     var options = TestOptions();
@@ -952,6 +961,10 @@ static Task InvalidApplicationRecordsAreRejected()
 
     _ = Throws<ArgumentException>(() => encoder.EncodePacket(shortRecord, destination, out _));
     _ = Throws<ArgumentException>(() => encoder.TryEncodePacket(incompleteRecord, destination, out _, out _));
+
+    using var streamingEncoder = new LinkerFecStreamingEncoder(options);
+    _ = Throws<ArgumentException>(() => streamingEncoder.EncodePacket(shortRecord.AsSpan(), destination.AsSpan(), out _));
+    _ = Throws<ArgumentException>(() => streamingEncoder.TryEncodePacket(incompleteRecord.AsSpan(), destination.AsSpan(), out _, out _));
 
     using var decoder = new LinkerFecCodec(options);
     var decoded = new byte[options.MaxDecodeBufferSize];
@@ -978,6 +991,9 @@ static Task InvalidOptionsAreRejected()
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = -1 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { MaxSkipBlocks = 8, MaxDecoderBlocks = 4 }));
     _ = Throws<ArgumentOutOfRangeException>(() => new LinkerFecCodec(new LinkerFecOptions { RepairGenerationMode = (LinkerFecRepairGenerationMode)42 }));
+    _ = Throws<ArgumentException>(() => new LinkerFecCodec(new LinkerFecOptions { SourceSymbolsPerBlock = 10, RepairProfile = [] }));
+    _ = Throws<ArgumentException>(() => new LinkerFecCodec(new LinkerFecOptions { SourceSymbolsPerBlock = 10, RepairProfile = [new LinkerFecRepairProfilePoint(1, 1)] }));
+    _ = Throws<ArgumentException>(() => new LinkerFecCodec(new LinkerFecOptions { SourceSymbolsPerBlock = 10, RepairProfile = [new LinkerFecRepairProfilePoint(5, 1), new LinkerFecRepairProfilePoint(3, 1), new LinkerFecRepairProfilePoint(10, 2)] }));
     return Task.CompletedTask;
 }
 
@@ -1099,50 +1115,6 @@ static void AddLengthPrefixedFrames(ReadOnlySpan<byte> packet, List<byte[]> fram
     }
 }
 
-static ReadOnlyMemory<byte> DecodeBatchedEncodedPacket(
-    ReadOnlyMemory<byte> encodedPacket,
-    LinkerFecCodec decoder,
-    byte[] decoded)
-{
-    using var output = new MemoryStream();
-    var span = encodedPacket.Span;
-    var offset = 0;
-    while (offset < span.Length)
-    {
-        Assert(span.Length - offset >= sizeof(int), "Batched encoded packet ended inside a frame length prefix.");
-        var frameLength = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(offset, sizeof(int)));
-        offset += sizeof(int);
-        Assert(frameLength > 0 && frameLength <= span.Length - offset,
-            $"Invalid batched FEC frame length {frameLength} at offset {offset}.");
-
-        if (decoder.TryDecodeFrame(span.Slice(offset, frameLength), decoded.AsSpan(), out var decodedLength))
-        {
-            output.Write(decoded.AsSpan(0, decodedLength));
-        }
-
-        offset += frameLength;
-    }
-
-    return output.ToArray();
-}
-
-static List<byte[]> DecodeBatchedFrames(IEnumerable<byte[]> frames, LinkerFecOptions options)
-{
-    var decodedPackets = new List<byte[]>();
-    var decoded = new byte[options.MaxDecodeBufferSize];
-    using var decoder = new LinkerFecCodec(options);
-
-    foreach (var frame in frames)
-    {
-        if (decoder.TryDecodeFrame(frame.AsSpan(), decoded.AsSpan(), out var decodedLength))
-        {
-            decodedPackets.AddRange(ParsePacketRecords(decoded.AsMemory(0, decodedLength)));
-        }
-    }
-
-    return decodedPackets;
-}
-
 static void AddLengthPrefixedFramesWithBlockIds(
     ReadOnlySpan<byte> packet,
     LinkerFecOptions options,
@@ -1224,7 +1196,7 @@ static int GetEncodedPacketSize(int rawPacketLength, LinkerFecOptions options)
     return checked(
         (sourceCount * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize)) +
         rawPacketLength +
-        (options.RepairSymbolsPerBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + options.SymbolSize)));
+        (options.MaxRepairSymbolsPerEncodedBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + options.SymbolSize)));
 }
 
 static byte[] DeterministicBytes(int length)
@@ -1299,7 +1271,7 @@ static List<byte[]> ParsePacketRecords(ReadOnlyMemory<byte> packetBatch)
         Assert(span.Length - offset >= sizeof(int), "Packet record list ended inside a length prefix.");
         var packetLength = BinaryPrimitives.ReadInt32LittleEndian(span.Slice(offset, sizeof(int)));
         offset += sizeof(int);
-        Assert(packetLength >= 0, "Batched packet length cannot be negative.");
+        Assert(packetLength >= 0, "Packet record length cannot be negative.");
         Assert(packetLength <= span.Length - offset, "Packet record list ended inside a packet payload.");
 
         packets.Add(span.Slice(offset, packetLength).ToArray());

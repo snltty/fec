@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -12,6 +13,7 @@ public sealed class LinkerFecCodec : IDisposable
 {
     private readonly LinkerFecOptions _options;
     private readonly Dictionary<ulong, DecoderBlock> _decoderBlocks = [];
+    private readonly Dictionary<ulong, PendingStreamingDecodeBlock> _pendingStreamingDecodeBlocks = [];
     private byte[][]? _repairCoefficientCache;
     private int _repairCoefficientSourceCount;
     private byte[]? _intermediateSymbolBuffer;
@@ -323,6 +325,24 @@ public sealed class LinkerFecCodec : IDisposable
             return false;
         }
 
+        if (TryDecodeStreamingSourceFrame(
+            encodedFrame,
+            blockId,
+            destination,
+            packetKinds,
+            writePacketKinds,
+            out bytesWritten,
+            out packetCount,
+            out var streamingSourceHandled))
+        {
+            return true;
+        }
+
+        if (streamingSourceHandled)
+        {
+            return false;
+        }
+
         if (TryDecodeSingleSourceFrame(
             encodedFrame,
             blockId,
@@ -386,6 +406,12 @@ public sealed class LinkerFecCodec : IDisposable
             return true;
         }
 
+        if (block is not null && block.MissingSourceCount == 0)
+        {
+            CompleteDecodedBlock(blockId, block);
+            return false;
+        }
+
         if (!TryDecodeReceivedBlock(blockId, destination, out bytesWritten, out var recoveredPacketCount))
         {
             return false;
@@ -429,9 +455,10 @@ public sealed class LinkerFecCodec : IDisposable
                 throw new InvalidDataException($"Source symbol count {symbol.SourceSymbolCount} exceeds configured limit.");
             }
 
-            if (symbol.RepairSymbolCount != _options.RepairSymbolsPerBlock)
+            var expectedRepairSymbolCount = _options.GetRepairSymbolsForSourceCount(symbol.SourceSymbolCount);
+            if (symbol.RepairSymbolCount != expectedRepairSymbolCount)
             {
-                throw new InvalidDataException($"Unexpected repair symbol count {symbol.RepairSymbolCount}; expected {_options.RepairSymbolsPerBlock}.");
+                throw new InvalidDataException($"Unexpected repair symbol count {symbol.RepairSymbolCount}; expected {expectedRepairSymbolCount}.");
             }
 
             if (symbol.IsFinalBlock)
@@ -464,6 +491,7 @@ public sealed class LinkerFecCodec : IDisposable
                 return false;
             }
 
+            AddPendingStreamingSourcesToBlock(symbol.BlockId, block);
             return true;
         }
         catch
@@ -474,6 +502,146 @@ public sealed class LinkerFecCodec : IDisposable
             }
 
             throw;
+        }
+    }
+
+    private bool TryDecodeStreamingSourceFrame(
+        ReadOnlySpan<byte> encodedFrame,
+        ulong blockId,
+        Span<byte> destination,
+        Span<LinkerFecDecodedPacketKind> packetKinds,
+        bool writePacketKinds,
+        out int bytesWritten,
+        out int packetCount,
+        out bool handled)
+    {
+        bytesWritten = 0;
+        packetCount = 0;
+        handled = false;
+
+        if (LinkerFecEncodedSymbol.ReadSourceSymbolCount(encodedFrame) != 0)
+        {
+            return false;
+        }
+
+        handled = true;
+        if (LinkerFecEncodedSymbol.IsRepairFrame(encodedFrame))
+        {
+            throw new FormatException("Streaming source frame cannot be marked as repair.");
+        }
+
+        if ((LinkerFecEncodedSymbol.ReadFlags(encodedFrame) & 1) != 0)
+        {
+            throw new FormatException("Streaming source frame cannot mark a final block.");
+        }
+
+        var symbolId = LinkerFecEncodedSymbol.ReadSymbolId(encodedFrame);
+        if (symbolId >= _options.SourceSymbolsPerBlock)
+        {
+            throw new InvalidDataException("Streaming source symbol id exceeds configured source symbol limit.");
+        }
+
+        var payloadLength = LinkerFecEncodedSymbol.ReadPayloadLength(encodedFrame);
+        if (payloadLength > _options.SymbolSize)
+        {
+            throw new InvalidDataException("Streaming source payload exceeds the configured symbol size.");
+        }
+
+        var payload = encodedFrame.Slice(LinkerFecEncodedSymbol.HeaderSize, payloadLength);
+        if (_decoderBlocks.TryGetValue(blockId, out var block))
+        {
+            if (symbolId >= block.SourceSymbolCount)
+            {
+                throw new InvalidDataException("Streaming source symbol id exceeds the finalized source count.");
+            }
+
+            var sourceSymbol = ReceivedSymbol.CreatePooledSource(
+                blockId,
+                block.BlockLength,
+                block.SymbolSize,
+                block.SourceSymbolCount,
+                block.RepairSymbolCount,
+                symbolId,
+                block.IsFinalBlock,
+                payload);
+            if (!block.Add(sourceSymbol))
+            {
+                sourceSymbol.Dispose();
+                return false;
+            }
+
+            bytesWritten = WriteSourcePayloadRecord(payload, destination);
+            var fecRecoveredPacketCount = 0;
+            if (block.CanDecode)
+            {
+                if (block.MissingSourceCount == 0)
+                {
+                    CompleteDecodedBlock(blockId, block);
+                }
+                else
+                {
+                    var missingSourceCount = block.MissingSourceCount;
+                    if (block.TryDecodeMissing(destination.Slice(bytesWritten), out var recoveredBytes))
+                    {
+                        bytesWritten += recoveredBytes;
+                        fecRecoveredPacketCount = missingSourceCount;
+                        CompleteDecodedBlock(blockId, block);
+                    }
+                }
+            }
+
+            packetCount = ValidateDecodedApplicationRecords(destination[..bytesWritten]);
+            WriteDecodedPacketKinds(
+                packetKinds,
+                writePacketKinds,
+                packetCount,
+                sourcePacketCount: packetCount - fecRecoveredPacketCount,
+                recoveredPacketCount: fecRecoveredPacketCount);
+            FecRecoveredPacketCount += fecRecoveredPacketCount;
+            return true;
+        }
+
+        if (!_pendingStreamingDecodeBlocks.TryGetValue(blockId, out var pending))
+        {
+            if (_pendingStreamingDecodeBlocks.Count >= _options.MaxDecoderBlocks)
+            {
+                throw new InvalidOperationException("Too many incomplete streaming decoder blocks are buffered.");
+            }
+
+            pending = new PendingStreamingDecodeBlock(_options.SourceSymbolsPerBlock);
+            _pendingStreamingDecodeBlocks.Add(blockId, pending);
+        }
+
+        if (!pending.Add(symbolId, payload))
+        {
+            return false;
+        }
+
+        bytesWritten = WriteSourcePayloadRecord(payload, destination);
+        packetCount = 1;
+        WriteDecodedPacketKinds(
+            packetKinds,
+            writePacketKinds,
+            packetCount,
+            sourcePacketCount: 1,
+            recoveredPacketCount: 0);
+        return true;
+    }
+
+    private void AddPendingStreamingSourcesToBlock(ulong blockId, DecoderBlock block)
+    {
+        if (!_pendingStreamingDecodeBlocks.Remove(blockId, out var pending))
+        {
+            return;
+        }
+
+        try
+        {
+            pending.AddToBlock(block);
+        }
+        finally
+        {
+            pending.Dispose();
         }
     }
 
@@ -663,7 +831,7 @@ public sealed class LinkerFecCodec : IDisposable
     {
         if (_repairCoefficientCache is null || _repairCoefficientSourceCount != sourceCount)
         {
-            _repairCoefficientCache = new byte[_options.RepairSymbolsPerBlock][];
+            _repairCoefficientCache = new byte[_options.MaxRepairSymbolsPerEncodedBlock][];
             _repairCoefficientSourceCount = sourceCount;
         }
 
@@ -1117,6 +1285,7 @@ public sealed class LinkerFecCodec : IDisposable
     private void CompleteDecodedBlock(ulong blockId, DecoderBlock block)
     {
         _decoderBlocks.Remove(blockId);
+        DisposePendingStreamingDecodeBlock(blockId);
         MarkDecodedWindowBlockId(blockId);
         block.Dispose();
     }
@@ -1124,6 +1293,11 @@ public sealed class LinkerFecCodec : IDisposable
     private static int WriteSourceSymbolRecord(ReceivedSymbol symbol, Span<byte> destination)
     {
         var payload = symbol.PayloadSpan;
+        return WriteSourcePayloadRecord(payload, destination);
+    }
+
+    private static int WriteSourcePayloadRecord(ReadOnlySpan<byte> payload, Span<byte> destination)
+    {
         var recordLength = checked(sizeof(int) + payload.Length);
         if (destination.Length < recordLength)
         {
@@ -1157,7 +1331,7 @@ public sealed class LinkerFecCodec : IDisposable
 
         handled = true;
 
-        var repairSymbolCount = _options.RepairSymbolsPerBlock;
+        var repairSymbolCount = _options.GetRepairSymbolsForSourceCount(sourceSymbolCount);
         var symbolId = LinkerFecEncodedSymbol.ReadSymbolId(encodedFrame);
         var payloadLength = LinkerFecEncodedSymbol.ReadPayloadLength(encodedFrame);
         var flags = LinkerFecEncodedSymbol.ReadFlags(encodedFrame);
@@ -1218,6 +1392,11 @@ public sealed class LinkerFecCodec : IDisposable
             return true;
         }
 
+        if (TryCompleteAlreadyDeliveredStreamingSourceBlock(blockId, sourceSymbolCount))
+        {
+            return false;
+        }
+
         if (payloadLength > symbolSize)
         {
             throw new InvalidDataException("Single-source repair payload length exceeds symbol size.");
@@ -1253,6 +1432,23 @@ public sealed class LinkerFecCodec : IDisposable
         MarkDecodedWindowBlockId(blockId);
         bytesWritten = blockLength;
         fecRecoveredPacketCount = 1;
+        return true;
+    }
+
+    private bool TryCompleteAlreadyDeliveredStreamingSourceBlock(ulong blockId, int sourceSymbolCount)
+    {
+        if (!_pendingStreamingDecodeBlocks.TryGetValue(blockId, out var pending))
+        {
+            return false;
+        }
+
+        if (!pending.ContainsAllSources(sourceSymbolCount))
+        {
+            return false;
+        }
+
+        DisposePendingStreamingDecodeBlock(blockId);
+        MarkDecodedWindowBlockId(blockId);
         return true;
     }
 
@@ -1354,6 +1550,8 @@ public sealed class LinkerFecCodec : IDisposable
         {
             block.Dispose();
         }
+
+        DisposePendingStreamingDecodeBlock(blockId);
     }
 
     private void AddDecodedWindowBlockId(ulong blockId)
@@ -1446,6 +1644,11 @@ public sealed class LinkerFecCodec : IDisposable
             _decoderBlocks.Remove(blockId);
             block.Dispose();
         }
+
+        while (TryFindPendingStreamingDecodeBlockBefore(minBlockId, out var pendingBlockId))
+        {
+            DisposePendingStreamingDecodeBlock(pendingBlockId);
+        }
     }
 
     private bool TryFindDecoderBlockBefore(ulong minBlockId, out ulong blockId)
@@ -1461,6 +1664,152 @@ public sealed class LinkerFecCodec : IDisposable
         }
 
         return false;
+    }
+
+    private bool TryFindPendingStreamingDecodeBlockBefore(ulong minBlockId, out ulong blockId)
+    {
+        blockId = 0;
+        foreach (var pair in _pendingStreamingDecodeBlocks)
+        {
+            if (pair.Key < minBlockId)
+            {
+                blockId = pair.Key;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void DisposePendingStreamingDecodeBlock(ulong blockId)
+    {
+        if (_pendingStreamingDecodeBlocks.Remove(blockId, out var pending))
+        {
+            pending.Dispose();
+        }
+    }
+
+    private sealed class PendingStreamingDecodeBlock : IDisposable
+    {
+        private readonly byte[][]? _payloads;
+        private readonly int[] _payloadLengths;
+        private readonly bool[] _assigned;
+        private bool _disposed;
+
+        public PendingStreamingDecodeBlock(int sourceSymbolLimit)
+        {
+            _payloads = new byte[sourceSymbolLimit][];
+            _payloadLengths = new int[sourceSymbolLimit];
+            _assigned = new bool[sourceSymbolLimit];
+        }
+
+        public bool Add(int symbolId, ReadOnlySpan<byte> payload)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_assigned[symbolId])
+            {
+                return false;
+            }
+
+            var rented = payload.Length == 0 ? Array.Empty<byte>() : ArrayPool<byte>.Shared.Rent(payload.Length);
+            if (payload.Length != 0)
+            {
+                payload.CopyTo(rented);
+            }
+
+            _payloads![symbolId] = rented;
+            _payloadLengths[symbolId] = payload.Length;
+            _assigned[symbolId] = true;
+            return true;
+        }
+
+        public bool ContainsAllSources(int sourceSymbolCount)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (sourceSymbolCount < 0 || sourceSymbolCount > _assigned.Length)
+            {
+                throw new ArgumentOutOfRangeException(nameof(sourceSymbolCount), sourceSymbolCount, "Invalid source symbol count.");
+            }
+
+            for (var symbolId = 0; symbolId < _assigned.Length; symbolId++)
+            {
+                if (!_assigned[symbolId])
+                {
+                    if (symbolId < sourceSymbolCount)
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                if (symbolId >= sourceSymbolCount)
+                {
+                    throw new InvalidDataException("Buffered streaming source exceeds the finalized source count.");
+                }
+            }
+
+            return true;
+        }
+
+        public void AddToBlock(DecoderBlock block)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            for (var symbolId = 0; symbolId < _assigned.Length; symbolId++)
+            {
+                if (!_assigned[symbolId])
+                {
+                    continue;
+                }
+
+                if (symbolId >= block.SourceSymbolCount)
+                {
+                    throw new InvalidDataException("Buffered streaming source exceeds the finalized source count.");
+                }
+
+                var payload = _payloads![symbolId].AsSpan(0, _payloadLengths[symbolId]);
+                var symbol = ReceivedSymbol.CreatePooledSource(
+                    block.BlockId,
+                    block.BlockLength,
+                    block.SymbolSize,
+                    block.SourceSymbolCount,
+                    block.RepairSymbolCount,
+                    symbolId,
+                    block.IsFinalBlock,
+                    payload);
+                if (!block.Add(symbol))
+                {
+                    symbol.Dispose();
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            for (var i = 0; i < _assigned.Length; i++)
+            {
+                if (!_assigned[i])
+                {
+                    continue;
+                }
+
+                var payload = _payloads![i];
+                if (payload.Length != 0)
+                {
+                    ArrayPool<byte>.Shared.Return(payload);
+                }
+
+                _payloads[i] = Array.Empty<byte>();
+                _payloadLengths[i] = 0;
+                _assigned[i] = false;
+            }
+        }
     }
 
     private void ThrowIfDisposed()
@@ -1479,5 +1828,11 @@ public sealed class LinkerFecCodec : IDisposable
         }
 
         _decoderBlocks.Clear();
+        foreach (var pending in _pendingStreamingDecodeBlocks.Values)
+        {
+            pending.Dispose();
+        }
+
+        _pendingStreamingDecodeBlocks.Clear();
     }
 }

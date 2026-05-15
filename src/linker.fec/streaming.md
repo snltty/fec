@@ -1,0 +1,10 @@
+
+# LinkerFecStreamingEncoder 要求
+
+1. LinkerFecStreamingEncoder是对LinkerFecCodec的包装
+2. LinkerFecStreamingEncoder至少有TryEncodePacket、TryDecodeFrame、TryFlushRepairs、TryForceFlushRepairs
+3. TryEncodePacket输入的rawPacket是4+payload+4+payload，输出的是4+frame，如果一次输出多个就是4+frame+4+frame，方便我业务层分割发送frame
+4. LinkerFecStreamingEncoder.TryEncodePacket 的逻辑应该是，如果包够了就输出source frame + repair frame，包没够就只直接输入source frame，等待后续包来，或者超时了再输出repair frame
+5. TryDecodeFrame直接调用LinkerFecCodec.TryDecodeFrame ，这样我就不必编码端用LinkerFecStreamingEncoder而解码端用LinkerFecCodec
+6. TryFlushRepairs，TryForceFlushRepairs和输出的也是4+frame，如果一次输出多个就是4+frame+4+frame
+7. TryFlushRepairs，超时后会输出repair frame，TryForceFlushRepairs是强制立即输出repair frame

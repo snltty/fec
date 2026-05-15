@@ -1,10 +1,9 @@
-using linker.fec;
 using System.Buffers.Binary;
 using System.Text;
-
+using linker.fec;
 
 EncodeAndDecode();
-await EncodeAndDecodeBatch().ConfigureAwait(false);
+EncodeAndDecodeStreaming();
 Console.ReadLine();
 
 void EncodeAndDecode()
@@ -27,70 +26,63 @@ void EncodeAndDecode()
 
     if (encoder.TryEncodePacket(rawPacket, encodeBuffer, out int bytesWritten, out int packetCount))
     {
-        var memory = encodeBuffer.AsMemory(0, bytesWritten);
-        for (int i = 0; i < packetCount; i++)
-        {
-            var frameLength = BinaryPrimitives.ReadInt32LittleEndian(memory.Span);
-            var frame = memory.Slice(sizeof(int), frameLength);
-
-            if (decoder.TryDecodeFrame(frame, decodeBuffer, out bytesWritten, out var decodedPacketCount))
-            {
-                var packets = decodeBuffer.AsMemory(0, bytesWritten);
-                for (var decodedIndex = 0; decodedIndex < decodedPacketCount; decodedIndex++)
-                {
-                    var packetLength = BinaryPrimitives.ReadInt32LittleEndian(packets.Span);
-                    var packet = packets.Slice(sizeof(int), packetLength);
-                    Console.WriteLine($"decoded {Encoding.UTF8.GetString(packet.Span)}");
-                    packets = packets.Slice(sizeof(int) + packetLength);
-
-                }
-            }
-
-            memory = memory.Slice(4 + frameLength);
-        }
+        DecodeLengthPrefixedFrames(encodeBuffer.AsMemory(0, bytesWritten), decoder, decodeBuffer, "decoded");
     }
 }
 
-async Task EncodeAndDecodeBatch()
+void EncodeAndDecodeStreaming()
 {
     var options = new LinkerFecOptions
     {
-        SourceSymbolsPerBlock = 10,
+        SourceSymbolsPerBlock = 3,
         RepairSymbolsPerBlock = 2,
         SymbolSize = 1433
     };
+    var encodeBuffer = new byte[options.MaxEncodeBufferSize];
     var decodeBuffer = new byte[options.MaxDecodeBufferSize];
-    var decoder = new LinkerFecCodec(options);
-    LinkerFecPacketBatcher packetBatcher = new LinkerFecPacketBatcher(256 * 1024, options);
+    using var encoder = new LinkerFecStreamingEncoder(options);
+    using var decoder = new LinkerFecCodec(options);
 
-    for (int i = 0; i < 5; i++)
+    for (var i = 0; i < options.SourceSymbolsPerBlock; i++)
     {
-        byte[] source = Encoding.UTF8.GetBytes($"hello world!{i}");
-        await packetBatcher.WriteAsync(source).ConfigureAwait(false);
+        byte[] source = Encoding.UTF8.GetBytes($"hello streaming!{i}");
+        byte[] rawPacket = new byte[sizeof(int) + source.Length];
+        BinaryPrimitives.WriteInt32LittleEndian(rawPacket.AsSpan(0, sizeof(int)), source.Length);
+        source.CopyTo(rawPacket.AsSpan(sizeof(int)));
+
+        var bytesWritten = encoder.EncodePacket(
+            rawPacket,
+            encodeBuffer,
+            out _,
+            isFinalPacket: i == options.SourceSymbolsPerBlock - 1);
+        DecodeLengthPrefixedFrames(encodeBuffer.AsMemory(0, bytesWritten), decoder, decodeBuffer, "streaming decoded");
     }
-    while (true)
+}
+
+void DecodeLengthPrefixedFrames(
+    ReadOnlyMemory<byte> encoded,
+    LinkerFecCodec decoder,
+    byte[] decodeBuffer,
+    string prefix)
+{
+    var memory = encoded;
+    while (!memory.IsEmpty)
     {
-        var memory = await packetBatcher.ReadAsync().ConfigureAwait(false);
-        do
+        var frameLength = BinaryPrimitives.ReadInt32LittleEndian(memory.Span);
+        var frame = memory.Slice(sizeof(int), frameLength);
+
+        if (decoder.TryDecodeFrame(frame, decodeBuffer, out var bytesWritten, out var decodedPacketCount))
         {
-            var frameLength = BinaryPrimitives.ReadInt32LittleEndian(memory.Span);
-            var frame = memory.Slice(sizeof(int), frameLength);
-
-            if (decoder.TryDecodeFrame(frame, decodeBuffer, out var bytesWritten, out var decodedPacketCount))
+            var packets = decodeBuffer.AsMemory(0, bytesWritten);
+            for (var decodedIndex = 0; decodedIndex < decodedPacketCount; decodedIndex++)
             {
-                var packets = decodeBuffer.AsMemory(0, bytesWritten);
-                do
-                {
-                    var packetLength = BinaryPrimitives.ReadInt32LittleEndian(packets.Span);
-                    var packet = packets.Slice(sizeof(int), packetLength);
-                    Console.WriteLine($"Batch decoded {Encoding.UTF8.GetString(packet.Span)}");
-                    packets = packets.Slice(sizeof(int) + packetLength);
-
-                } while (packets.Length > 0);
+                var packetLength = BinaryPrimitives.ReadInt32LittleEndian(packets.Span);
+                var packet = packets.Slice(sizeof(int), packetLength);
+                Console.WriteLine($"{prefix} {Encoding.UTF8.GetString(packet.Span)}");
+                packets = packets.Slice(sizeof(int) + packetLength);
             }
+        }
 
-            memory = memory.Slice(sizeof(int) + frameLength);
-
-        } while (memory.Length > 0);
+        memory = memory.Slice(sizeof(int) + frameLength);
     }
 }

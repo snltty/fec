@@ -20,15 +20,36 @@ public sealed class LinkerFecOptions
     public int SymbolSize { get; init; } = 1440;
     public int SourceSymbolsPerBlock { get; init; } = 2;
     public int RepairSymbolsPerBlock { get; init; } = 1;
+    public IReadOnlyList<LinkerFecRepairProfilePoint>? RepairProfile { get; init; }
     public int MaxDecoderBlocks { get; init; } = 256;
     public int MaxSkipBlocks { get; init; } = 10;
     public LinkerFecRepairGenerationMode RepairGenerationMode { get; init; } = LinkerFecRepairGenerationMode.Auto;
 
     public int BlockSize => checked(SymbolSize * SourceSymbolsPerBlock);
 
+    public int MaxRepairSymbolsPerEncodedBlock
+    {
+        get
+        {
+            var profile = RepairProfile;
+            if (profile is null || profile.Count == 0)
+            {
+                return RepairSymbolsPerBlock;
+            }
+
+            var maxRepair = profile[0].RepairSymbols;
+            for (var i = 1; i < profile.Count; i++)
+            {
+                maxRepair = Math.Max(maxRepair, profile[i].RepairSymbols);
+            }
+
+            return maxRepair;
+        }
+    }
+
     public int MaxEncodeBufferSize => checked(
         SourceSymbolsPerBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + SymbolSize) +
-        RepairSymbolsPerBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + SymbolSize));
+        MaxRepairSymbolsPerEncodedBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + SymbolSize));
 
     public int MaxDecodeBufferSize => checked((SymbolSize + sizeof(int)) * SourceSymbolsPerBlock);
 
@@ -48,9 +69,39 @@ public sealed class LinkerFecOptions
                 "Source symbol count cannot exceed the configured source symbols per block.");
         }
 
-        var proportionalRepairCount = checked(
-            ((sourceSymbolCount * RepairSymbolsPerBlock) + SourceSymbolsPerBlock - 1) / SourceSymbolsPerBlock);
-        return Math.Min(RepairSymbolsPerBlock, Math.Max(MinRepairSymbolsPerBlock, proportionalRepairCount));
+        var profile = RepairProfile;
+        if (profile is null || profile.Count == 0)
+        {
+            return RepairSymbolsPerBlock;
+        }
+
+        var previous = profile[0];
+        if (sourceSymbolCount <= previous.SourceSymbols)
+        {
+            return previous.RepairSymbols;
+        }
+
+        for (var i = 1; i < profile.Count; i++)
+        {
+            var next = profile[i];
+            if (sourceSymbolCount == next.SourceSymbols)
+            {
+                return next.RepairSymbols;
+            }
+
+            if (sourceSymbolCount < next.SourceSymbols)
+            {
+                var sourceDelta = next.SourceSymbols - previous.SourceSymbols;
+                var repairDelta = next.RepairSymbols - previous.RepairSymbols;
+                var interpolated = previous.RepairSymbols +
+                    (repairDelta * (double)(sourceSymbolCount - previous.SourceSymbols) / sourceDelta);
+                return checked((int)Math.Ceiling(interpolated));
+            }
+
+            previous = next;
+        }
+
+        return previous.RepairSymbols;
     }
 
     internal void Validate()
@@ -73,7 +124,9 @@ public sealed class LinkerFecOptions
                 $"Repair symbol count must be in [{MinRepairSymbolsPerBlock}, {MaxRepairSymbolsPerBlock}].");
         }
 
-        if (SourceSymbolsPerBlock + RepairSymbolsPerBlock > MaxSymbolsPerBlock)
+        ValidateRepairProfile();
+
+        if (SourceSymbolsPerBlock + MaxRepairSymbolsPerEncodedBlock > MaxSymbolsPerBlock)
         {
             throw new ArgumentOutOfRangeException(nameof(RepairSymbolsPerBlock),
                 "The compact frame format supports at most 256 total source and repair symbols per block.");
@@ -113,6 +166,71 @@ public sealed class LinkerFecOptions
         {
             throw new ArgumentOutOfRangeException(nameof(RepairGenerationMode), RepairGenerationMode,
                 "Invalid repair generation mode.");
+        }
+
+        for (var sourceCount = MinSourceSymbolsPerBlock; sourceCount <= SourceSymbolsPerBlock; sourceCount++)
+        {
+            var repairCount = GetRepairSymbolsForSourceCount(sourceCount);
+            if (repairCount is < MinRepairSymbolsPerBlock or > MaxRepairSymbolsPerBlock)
+            {
+                throw new ArgumentOutOfRangeException(nameof(RepairProfile), repairCount,
+                    "Repair profile generated an invalid repair symbol count.");
+            }
+
+            if (sourceCount + repairCount > MaxSymbolsPerBlock)
+            {
+                throw new ArgumentOutOfRangeException(nameof(RepairProfile),
+                    "Repair profile generated a block that exceeds the compact 256-symbol limit.");
+            }
+        }
+    }
+
+    private void ValidateRepairProfile()
+    {
+        var profile = RepairProfile;
+        if (profile is null)
+        {
+            return;
+        }
+
+        if (profile.Count == 0)
+        {
+            throw new ArgumentException("Repair profile cannot be empty.", nameof(RepairProfile));
+        }
+
+        var previousSourceSymbols = 0;
+        for (var i = 0; i < profile.Count; i++)
+        {
+            var point = profile[i];
+            if (point.SourceSymbols is < MinSourceSymbolsPerBlock or > MaxSourceSymbolsPerBlock)
+            {
+                throw new ArgumentOutOfRangeException(nameof(RepairProfile), point.SourceSymbols,
+                    $"Repair profile source count must be in [{MinSourceSymbolsPerBlock}, {MaxSourceSymbolsPerBlock}].");
+            }
+
+            if (point.SourceSymbols > SourceSymbolsPerBlock)
+            {
+                throw new ArgumentOutOfRangeException(nameof(RepairProfile), point.SourceSymbols,
+                    "Repair profile source count cannot exceed the configured source symbols per block.");
+            }
+
+            if (point.SourceSymbols <= previousSourceSymbols)
+            {
+                throw new ArgumentException("Repair profile source counts must be in strictly ascending order.", nameof(RepairProfile));
+            }
+
+            if (point.RepairSymbols is < MinRepairSymbolsPerBlock or > MaxRepairSymbolsPerBlock)
+            {
+                throw new ArgumentOutOfRangeException(nameof(RepairProfile), point.RepairSymbols,
+                    $"Repair profile repair count must be in [{MinRepairSymbolsPerBlock}, {MaxRepairSymbolsPerBlock}].");
+            }
+
+            previousSourceSymbols = point.SourceSymbols;
+        }
+
+        if (profile[^1].SourceSymbols != SourceSymbolsPerBlock)
+        {
+            throw new ArgumentException("Repair profile must end at SourceSymbolsPerBlock.", nameof(RepairProfile));
         }
     }
 }

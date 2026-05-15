@@ -191,6 +191,48 @@ internal struct ReceivedSymbol : IDisposable
         }
     }
 
+    public static ReceivedSymbol CreatePooledSource(
+        ulong blockId,
+        int blockLength,
+        int symbolSize,
+        int sourceSymbolCount,
+        int repairSymbolCount,
+        int symbolId,
+        bool isFinalBlock,
+        ReadOnlySpan<byte> payload)
+    {
+        var rented = payload.Length == 0 ? Array.Empty<byte>() : ArrayPool<byte>.Shared.Rent(payload.Length);
+        var shouldReturnRented = payload.Length != 0;
+        try
+        {
+            if (payload.Length != 0)
+            {
+                payload.CopyTo(rented);
+            }
+
+            var symbol = new ReceivedSymbol(
+                blockId,
+                blockLength,
+                symbolSize,
+                sourceSymbolCount,
+                repairSymbolCount,
+                symbolId,
+                isFinalBlock,
+                rented.AsMemory(0, payload.Length),
+                checked((ushort)payload.Length),
+                payload.Length == 0 ? null : rented);
+            shouldReturnRented = false;
+            return symbol;
+        }
+        finally
+        {
+            if (shouldReturnRented)
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+    }
+
     public void Dispose()
     {
         var buffer = _ownedBuffer;
@@ -232,7 +274,7 @@ internal struct ReceivedSymbol : IDisposable
             blockLength,
             options.SymbolSize,
             sourceSymbolCount,
-            options.RepairSymbolsPerBlock,
+            options.GetRepairSymbolsForSourceCount(sourceSymbolCount),
             LinkerFecEncodedSymbol.ReadSymbolId(header),
             (LinkerFecEncodedSymbol.ReadFlags(header) & 1) != 0,
             payload,
