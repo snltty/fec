@@ -47,12 +47,7 @@ new LinkerFecOptions
 
 客户端参数 `client ep192.168.1.3:12345` / `client ep192.168.1.3:12345 fec`
 
-以下结果中 ❌丢失、💚FEC算法恢复、其它正常
-
-
-#### 局域网内
-
-服务端双向丢包 10%
+服务端模拟双向丢包 10%
 
 ```
 iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP
@@ -61,6 +56,8 @@ iptables -A OUTPUT -p udp --sport 12345 -m statistic --mode random --probability
 iptables -D INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP
 iptables -D OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP
 ```
+
+以下结果中 ❌丢失、💚FEC算法恢复、其它正常
 
 ##### UDP
 
