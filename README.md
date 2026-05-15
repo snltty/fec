@@ -1,8 +1,6 @@
-## 1、项目说明
-
 这是一个零分配、高性能面向UDP实时传输的前向纠错（FEC）库。它把原始业务包编码成系统源帧和修复帧，接收端在部分 FEC 帧丢失时仍可恢复原始数据，用来降低UDP丢包对业务层的影响。
 
-## 2、冗余配置
+## 1、冗余配置
 
 #### 固定冗余
 
@@ -43,31 +41,27 @@ new LinkerFecOptions
 | 高丢包 | `1:2,10:4` | 单包 2 冗余，满批 40% 冗余 |
 | 省带宽 | `1:1,10:2` | 单包 1 冗余，满批 20% 冗余 |
 
-## 3、丢包测试
+## 2、丢包测试
 
 代码在`samples/linker.fec.sample.udp`，以下表格中 : ❌丢失、💚FEC算法恢复、其它正常
 
 #### 局域网内
 
-服务端双向丢包
+服务端双向丢包 10%
+
 ```
 iptables -A INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP
 iptables -A OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP
-```
 
-删除丢包规则 
-```
-iptables -D INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DRO
+iptables -D INPUT -p udp --dport 12345 -m statistic --mode random --probability 0.1 -j DROP
 iptables -D OUTPUT -p udp --sport 12345 -m statistic --mode random --probability 0.1 -j DROP
 ```
 
-
 ##### UDP
 
-```
-linker.fec.sample.udp.exe server ep0.0.0.0:12345
-linker.fec.sample.udp.exe client ep192.168.1.3:12345
-```
+`linker.fec.sample.udp.exe server ep0.0.0.0:12345`
+
+`linker.fec.sample.udp.exe client ep192.168.1.3:12345`
 
 |0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -84,10 +78,10 @@ linker.fec.sample.udp.exe client ep192.168.1.3:12345
 
 ##### UDP + FEC
 
-```
-linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec
-linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec
-```
+`linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec`
+
+`>linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec`
+
 
 |0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9|
 |---|---|---|---|---|---|---|---|---|---|
@@ -103,7 +97,7 @@ linker.fec.sample.udp.exe client ep192.168.1.3:12345 fec
 |90|91|92|💚|💚|💚|96|97|98|99|
 
 
-## 4、性能测试
+## 3、性能测试
 
 测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、I9 9900KF、32GB
 
