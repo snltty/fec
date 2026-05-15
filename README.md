@@ -4,7 +4,7 @@
 
 ## 2、冗余配置
 
-#### 1、固定冗余
+#### 固定冗余
 
 ```csharp
 new LinkerFecOptions
@@ -20,7 +20,7 @@ new LinkerFecOptions
 | 5 | 2 | `5 source frame + 2 repair frame` |
 | 10 | 2 | `10 source frame + 2 repair frame` |
 
-#### 2、策略冗余
+#### 策略冗余
 
 ```csharp
 new LinkerFecOptions
@@ -35,7 +35,7 @@ new LinkerFecOptions
 };
 ```
 
-推荐配置
+#### 推荐配置
 
 | 场景 | 推荐 profile | 说明 |
 |---|---|---|
@@ -47,7 +47,7 @@ new LinkerFecOptions
 
 代码在`samples/linker.fec.sample.udp`，以下表格中 : ❌丢失、💚FEC算法恢复、其它正常
 
-#### 1、局域网内
+#### 局域网内
 
 服务端双向丢包
 ```
@@ -62,7 +62,7 @@ iptables -D OUTPUT -p udp --sport 12345 -m statistic --mode random --probability
 ```
 
 
-##### 1. UDP
+##### UDP
 
 ```
 linker.fec.sample.udp.exe server ep0.0.0.0:12345
@@ -82,7 +82,7 @@ linker.fec.sample.udp.exe client ep192.168.1.3:12345
 |❌|81|82|83|84|85|❌|87|88|89|
 |❌|91|92|93|94|❌|96|97|98|99|
 
-##### 2. UDP + FEC
+##### UDP + FEC
 
 ```
 linker.fec.sample.udp.exe server ep0.0.0.0:12345 fec
