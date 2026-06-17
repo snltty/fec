@@ -53,25 +53,6 @@ if (fecDecoder.TryDecodeFrame(packet, fecDecodeBuffer, out int bytesWritten, out
 | 高丢包 | `1:2,10:4` | 单包 2 冗余，满批 40% 冗余 |
 | 省带宽 | `1:1,10:2` | 单包 1 冗余，满批 20% 冗余 |
 
-
-#### 性能测试
-
-测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、I9 9900KF、3600 32GB
-
-1 source + 1 repair，假设 source 帧 100% 丢失，只使用 repair 帧恢复的极端吞吐测试：
-
-```bash
-dotnet run -c Release --no-build --project tests/linker.fec.tests/linker.fec.tests.csproj -- --single-repair-throughput 10 --payload 1400
-```
-
-| 场景 | payload | FEC 配置 | 丢包模型 | 业务恢复吞吐 | 编码输出吞吐 | blocks/s |
-|---|---:|---|---|---:|---:|---:|
-| repair-only encode+decode | 1400B | 1 source + 1 repair | source 100% 丢失，仅 repair 恢复 | 102.31 Gbps | 206.22 Gbps | 9,134,548 |
-
-每个 block 输出 2 个 FEC frame：source frame `1408B`，repair frame `1410B`。业务恢复吞吐按成功恢复的原始 payload 统计；编码输出吞吐按 source+repair 总输出字节统计。
-
-
-
 ## 2、KCP
 
 原开源项目 https://github.com/skywind3000/kcp
@@ -79,7 +60,8 @@ dotnet run -c Release --no-build --project tests/linker.fec.tests/linker.fec.tes
 #### 简单使用
 
 ```csharp
-KcpConnection kcpConnection = new KcpConnection(12138, 1500, 8192, 1, 10, 2, 1, udpSocket, remoteEndPoint, false);
+KcpConnection kcpConnection = new KcpConnection(12138, 1500, 8192, 1, 10, 2, 1,
+ udpSocket, remoteEndPoint, false);
 
 //发送端
 await kcpConnection.SendAsync(packet, token).ConfigureAwait(false);
@@ -100,23 +82,6 @@ while (!cts.IsCancellationRequested)
 }
 
 ```
-
-#### 性能测试
-
-测试环境: .NET 8.0、BenchmarkDotNet 、win11 x64 、I9 9900KF、3600 32GB
-
-KCP 与 Raw UDP loopback 吞吐对比：
-
-```bash
-dotnet run -c Release --no-build --project tests/linker.kcp.tests/linker.kcp.tests.csproj -- --loss-compare 10 0 10
-```
-
-| 场景 | payload | MTU | 丢包 | Raw UDP 到达吞吐 | KCP 可靠吞吐 | KCP/Raw |
-|---|---:|---:|---:|---:|---:|---:|
-| loopback loss proxy | 1400B | 1500 | 数据 10.04%，ACK 10.03% | 1.12 Gbps | 0.84 Gbps | 74.8% |
-
-Raw UDP 结果只统计成功到达的数据，不提供可靠性、顺序保证或丢包恢复；KCP 结果为 `KcpConnection` 在双向丢包下恢复后的业务吞吐。
-
 
 ## STUN
 
