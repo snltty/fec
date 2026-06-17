@@ -1,6 +1,8 @@
-这是一个linker使用的库项目，包括 FEC、KCP、STUN
+这是一个AI写的linker使用的库项目，包括 FEC、KCP、STUN
 
 ## 1、FEC
+
+FEC策略冗余发包，优化丢包网络
 
 #### 简单使用
 
@@ -83,7 +85,7 @@ while (!cts.IsCancellationRequested)
 
 ```
 
-## STUN
+## 3、STUN
 
 RFC 5780 NAT类型测试
 
