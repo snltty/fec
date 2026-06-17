@@ -1,3 +1,5 @@
+using System;
+
 namespace linker.fec.Internal;
 
 internal static class FecGenerators

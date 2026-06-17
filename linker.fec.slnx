@@ -3,13 +3,20 @@
     <Project Path="perf/linker.fec.perf/linker.fec.perf.csproj" />
   </Folder>
   <Folder Name="/samples/">
+    <Project Path="samples/linker.fec.sample.kcp/linker.fec.sample.kcp.csproj" Id="3e719da0-5104-4a8e-a7b9-94ce0f2788ad" />
     <Project Path="samples/linker.fec.sample.udp/linker.fec.sample.udp.csproj" Id="441db494-9ffd-476c-add4-90697dc043e1" />
     <Project Path="samples/linker.fec.sample/linker.fec.sample.csproj" />
+    <Project Path="samples/linker.stun.sample/linker.stun.sample.csproj" />
+    <Project Path="samples/linker.tun.bench/linker.tun.bench.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/linker.fec/linker.fec.csproj" />
+    <Project Path="src/linker.kcp/linker.kcp.csproj" />
+    <Project Path="src/linker.stun/linker.stun.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/linker.fec.tests/linker.fec.tests.csproj" />
+    <Project Path="tests/linker.kcp.tests/linker.kcp.tests.csproj" />
+    <Project Path="tests/linker.stun.tests/linker.stun.tests.csproj" />
   </Folder>
 </Solution>

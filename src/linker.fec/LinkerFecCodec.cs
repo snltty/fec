@@ -1,7 +1,8 @@
-using System.Buffers;
+using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.IO;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using linker.fec.Internal;
 
 namespace linker.fec;
@@ -11,9 +12,11 @@ namespace linker.fec;
 /// </summary>
 public sealed class LinkerFecCodec : IDisposable
 {
+    private const int RecordLengthPrefixSize = LinkerFecOptions.RecordLengthPrefixSize;
+    private const int FrameLengthPrefixSize = LinkerFecOptions.FrameLengthPrefixSize;
+
     private readonly LinkerFecOptions _options;
     private readonly Dictionary<ulong, DecoderBlock> _decoderBlocks = [];
-    private readonly Dictionary<ulong, PendingStreamingDecodeBlock> _pendingStreamingDecodeBlocks = [];
     private byte[][]? _repairCoefficientCache;
     private int _repairCoefficientSourceCount;
     private byte[]? _intermediateSymbolBuffer;
@@ -47,9 +50,9 @@ public sealed class LinkerFecCodec : IDisposable
     public long FecRecoveredPacketCount { get; private set; }
 
     /// <summary>
-    /// Encodes one length-prefixed application record list synchronously and writes all generated frames into
-    /// <paramref name="destination"/> as [4-byte frame length][frame] records.
-    /// The length prefix is little-endian and does not include the 4 prefix bytes.
+    /// Encodes one 2-byte length-prefixed application record list synchronously and writes all generated frames into
+    /// <paramref name="destination"/> as [2-byte frame length][frame] records.
+    /// The record length prefix is little-endian and does not include the 2 prefix bytes.
     /// </summary>
     public int EncodePacket(
         byte[] rawPacket,
@@ -63,9 +66,9 @@ public sealed class LinkerFecCodec : IDisposable
     }
 
     /// <summary>
-    /// Encodes one length-prefixed application record list synchronously and writes all generated frames into
-    /// <paramref name="destination"/> as [4-byte frame length][frame] records.
-    /// The length prefix is little-endian and does not include the 4 prefix bytes.
+    /// Encodes one 2-byte length-prefixed application record list synchronously and writes all generated frames into
+    /// <paramref name="destination"/> as [2-byte frame length][frame] records.
+    /// The record length prefix is little-endian and does not include the 2 prefix bytes.
     /// </summary>
     public int EncodePacket(
         ReadOnlyMemory<byte> rawPacket,
@@ -77,9 +80,9 @@ public sealed class LinkerFecCodec : IDisposable
     }
 
     /// <summary>
-    /// Encodes one length-prefixed application record list synchronously and writes all generated frames into
-    /// <paramref name="destination"/> as [4-byte frame length][frame] records.
-    /// The length prefix is little-endian and does not include the 4 prefix bytes.
+    /// Encodes one 2-byte length-prefixed application record list synchronously and writes all generated frames into
+    /// <paramref name="destination"/> as [2-byte frame length][frame] records.
+    /// The record length prefix is little-endian and does not include the 2 prefix bytes.
     /// </summary>
     public int EncodePacket(
         ReadOnlySpan<byte> rawPacket,
@@ -105,7 +108,7 @@ public sealed class LinkerFecCodec : IDisposable
     }
 
     /// <summary>
-    /// Tries to encode one length-prefixed application record list synchronously into [4-byte frame length][frame]
+    /// Tries to encode one 2-byte length-prefixed application record list synchronously into [2-byte frame length][frame]
     /// records. Returns false if <paramref name="destination"/> is too small.
     /// </summary>
     public bool TryEncodePacket(
@@ -121,7 +124,7 @@ public sealed class LinkerFecCodec : IDisposable
     }
 
     /// <summary>
-    /// Tries to encode one length-prefixed application record list synchronously into [4-byte frame length][frame]
+    /// Tries to encode one 2-byte length-prefixed application record list synchronously into [2-byte frame length][frame]
     /// records. Returns false if <paramref name="destination"/> is too small.
     /// </summary>
     public bool TryEncodePacket(
@@ -135,7 +138,7 @@ public sealed class LinkerFecCodec : IDisposable
     }
 
     /// <summary>
-    /// Tries to encode one length-prefixed application record list synchronously into [4-byte frame length][frame]
+    /// Tries to encode one 2-byte length-prefixed application record list synchronously into [2-byte frame length][frame]
     /// records. Returns false if <paramref name="destination"/> is too small.
     /// </summary>
     public bool TryEncodePacket(
@@ -236,7 +239,7 @@ public sealed class LinkerFecCodec : IDisposable
 
     /// <summary>
     /// Tries to decode one FEC frame. On success, <paramref name="packetKinds"/> receives one entry per decoded
-    /// [4-byte length][payload] record, in the same order as those records are written to <paramref name="destination"/>.
+    /// [2-byte length][payload] record, in the same order as those records are written to <paramref name="destination"/>.
     /// </summary>
     public bool TryDecodeFrame(
         ReadOnlyMemory<byte> encodedFrame,
@@ -273,7 +276,7 @@ public sealed class LinkerFecCodec : IDisposable
 
     /// <summary>
     /// Tries to decode one FEC frame. On success, <paramref name="packetKinds"/> receives one entry per decoded
-    /// [4-byte length][payload] record, in the same order as those records are written to <paramref name="destination"/>.
+    /// [2-byte length][payload] record, in the same order as those records are written to <paramref name="destination"/>.
     /// </summary>
     public bool TryDecodeFrame(
         ReadOnlySpan<byte> encodedFrame,
@@ -321,24 +324,6 @@ public sealed class LinkerFecCodec : IDisposable
         AdvanceDecodeWindow(blockId);
 
         if (blockId < _nextDecodeBlockId || HasDecodedWindowBlockId(blockId))
-        {
-            return false;
-        }
-
-        if (TryDecodeStreamingSourceFrame(
-            encodedFrame,
-            blockId,
-            destination,
-            packetKinds,
-            writePacketKinds,
-            out bytesWritten,
-            out packetCount,
-            out var streamingSourceHandled))
-        {
-            return true;
-        }
-
-        if (streamingSourceHandled)
         {
             return false;
         }
@@ -491,7 +476,6 @@ public sealed class LinkerFecCodec : IDisposable
                 return false;
             }
 
-            AddPendingStreamingSourcesToBlock(symbol.BlockId, block);
             return true;
         }
         catch
@@ -502,146 +486,6 @@ public sealed class LinkerFecCodec : IDisposable
             }
 
             throw;
-        }
-    }
-
-    private bool TryDecodeStreamingSourceFrame(
-        ReadOnlySpan<byte> encodedFrame,
-        ulong blockId,
-        Span<byte> destination,
-        Span<LinkerFecDecodedPacketKind> packetKinds,
-        bool writePacketKinds,
-        out int bytesWritten,
-        out int packetCount,
-        out bool handled)
-    {
-        bytesWritten = 0;
-        packetCount = 0;
-        handled = false;
-
-        if (LinkerFecEncodedSymbol.ReadSourceSymbolCount(encodedFrame) != 0)
-        {
-            return false;
-        }
-
-        handled = true;
-        if (LinkerFecEncodedSymbol.IsRepairFrame(encodedFrame))
-        {
-            throw new FormatException("Streaming source frame cannot be marked as repair.");
-        }
-
-        if ((LinkerFecEncodedSymbol.ReadFlags(encodedFrame) & 1) != 0)
-        {
-            throw new FormatException("Streaming source frame cannot mark a final block.");
-        }
-
-        var symbolId = LinkerFecEncodedSymbol.ReadSymbolId(encodedFrame);
-        if (symbolId >= _options.SourceSymbolsPerBlock)
-        {
-            throw new InvalidDataException("Streaming source symbol id exceeds configured source symbol limit.");
-        }
-
-        var payloadLength = LinkerFecEncodedSymbol.ReadPayloadLength(encodedFrame);
-        if (payloadLength > _options.SymbolSize)
-        {
-            throw new InvalidDataException("Streaming source payload exceeds the configured symbol size.");
-        }
-
-        var payload = encodedFrame.Slice(LinkerFecEncodedSymbol.HeaderSize, payloadLength);
-        if (_decoderBlocks.TryGetValue(blockId, out var block))
-        {
-            if (symbolId >= block.SourceSymbolCount)
-            {
-                throw new InvalidDataException("Streaming source symbol id exceeds the finalized source count.");
-            }
-
-            var sourceSymbol = ReceivedSymbol.CreatePooledSource(
-                blockId,
-                block.BlockLength,
-                block.SymbolSize,
-                block.SourceSymbolCount,
-                block.RepairSymbolCount,
-                symbolId,
-                block.IsFinalBlock,
-                payload);
-            if (!block.Add(sourceSymbol))
-            {
-                sourceSymbol.Dispose();
-                return false;
-            }
-
-            bytesWritten = WriteSourcePayloadRecord(payload, destination);
-            var fecRecoveredPacketCount = 0;
-            if (block.CanDecode)
-            {
-                if (block.MissingSourceCount == 0)
-                {
-                    CompleteDecodedBlock(blockId, block);
-                }
-                else
-                {
-                    var missingSourceCount = block.MissingSourceCount;
-                    if (block.TryDecodeMissing(destination.Slice(bytesWritten), out var recoveredBytes))
-                    {
-                        bytesWritten += recoveredBytes;
-                        fecRecoveredPacketCount = missingSourceCount;
-                        CompleteDecodedBlock(blockId, block);
-                    }
-                }
-            }
-
-            packetCount = ValidateDecodedApplicationRecords(destination[..bytesWritten]);
-            WriteDecodedPacketKinds(
-                packetKinds,
-                writePacketKinds,
-                packetCount,
-                sourcePacketCount: packetCount - fecRecoveredPacketCount,
-                recoveredPacketCount: fecRecoveredPacketCount);
-            FecRecoveredPacketCount += fecRecoveredPacketCount;
-            return true;
-        }
-
-        if (!_pendingStreamingDecodeBlocks.TryGetValue(blockId, out var pending))
-        {
-            if (_pendingStreamingDecodeBlocks.Count >= _options.MaxDecoderBlocks)
-            {
-                throw new InvalidOperationException("Too many incomplete streaming decoder blocks are buffered.");
-            }
-
-            pending = new PendingStreamingDecodeBlock(_options.SourceSymbolsPerBlock);
-            _pendingStreamingDecodeBlocks.Add(blockId, pending);
-        }
-
-        if (!pending.Add(symbolId, payload))
-        {
-            return false;
-        }
-
-        bytesWritten = WriteSourcePayloadRecord(payload, destination);
-        packetCount = 1;
-        WriteDecodedPacketKinds(
-            packetKinds,
-            writePacketKinds,
-            packetCount,
-            sourcePacketCount: 1,
-            recoveredPacketCount: 0);
-        return true;
-    }
-
-    private void AddPendingStreamingSourcesToBlock(ulong blockId, DecoderBlock block)
-    {
-        if (!_pendingStreamingDecodeBlocks.Remove(blockId, out var pending))
-        {
-            return;
-        }
-
-        try
-        {
-            pending.AddToBlock(block);
-        }
-        finally
-        {
-            pending.Dispose();
         }
     }
 
@@ -730,9 +574,9 @@ public sealed class LinkerFecCodec : IDisposable
         var blockId = _nextEncodeBlockId++;
         var sourcePayload = GetSingleRecordPayload(rawPacket);
         var sourceFrameLength = LinkerFecEncodedSymbol.HeaderSize + sourcePayload.Length;
-        WriteInt32LittleEndian(destination, 0, sourceFrameLength);
+        WriteFrameLength(destination, 0, sourceFrameLength);
 
-        var sourceFrameOffset = sizeof(int);
+        var sourceFrameOffset = FrameLengthPrefixSize;
         var sourceFrame = destination.Slice(sourceFrameOffset, sourceFrameLength);
         sourcePayload.CopyTo(sourceFrame.Slice(LinkerFecEncodedSymbol.HeaderSize, sourcePayload.Length));
 
@@ -751,9 +595,9 @@ public sealed class LinkerFecCodec : IDisposable
             LinkerFecEncodedSymbol.RepairLengthSymbolSize +
             repairPayloadLength;
         var repairLengthPrefixOffset = sourceFrameOffset + sourceFrameLength;
-        WriteInt32LittleEndian(destination, repairLengthPrefixOffset, repairFrameLength);
+        WriteFrameLength(destination, repairLengthPrefixOffset, repairFrameLength);
 
-        var repairFrameOffset = repairLengthPrefixOffset + sizeof(int);
+        var repairFrameOffset = repairLengthPrefixOffset + FrameLengthPrefixSize;
         var repairFrame = destination.Slice(repairFrameOffset, repairFrameLength);
         var repairPayload = repairFrame.Slice(
             LinkerFecEncodedSymbol.HeaderSize + LinkerFecEncodedSymbol.RepairLengthSymbolSize,
@@ -864,8 +708,8 @@ public sealed class LinkerFecCodec : IDisposable
         ReadOnlySpan<byte> payload)
     {
         var frameLength = LinkerFecEncodedSymbol.HeaderSize + payload.Length;
-        BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(bytesWritten, sizeof(int)), frameLength);
-        bytesWritten += sizeof(int);
+        WriteFrameLength(destination, bytesWritten, frameLength);
+        bytesWritten += FrameLengthPrefixSize;
 
         LinkerFecEncodedSymbol.WriteFrame(
             destination.Slice(bytesWritten, frameLength),
@@ -903,8 +747,8 @@ public sealed class LinkerFecCodec : IDisposable
         var frameLength = LinkerFecEncodedSymbol.HeaderSize +
             LinkerFecEncodedSymbol.RepairLengthSymbolSize +
             repairPayloadLength;
-        BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(bytesWritten, sizeof(int)), frameLength);
-        bytesWritten += sizeof(int);
+        WriteFrameLength(destination, bytesWritten, frameLength);
+        bytesWritten += FrameLengthPrefixSize;
 
         var frame = destination.Slice(bytesWritten, frameLength);
         var lengthSymbol = GenerateRepairLengthSymbol(sourceLengths, coefficients);
@@ -989,7 +833,7 @@ public sealed class LinkerFecCodec : IDisposable
     private int GetPacketizedOutputSize(ReadOnlySpan<int> sourceLengths, int repairSymbolCount)
     {
         var sourceCount = sourceLengths.Length;
-        var size = checked((sourceCount + repairSymbolCount) * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize));
+        var size = checked((sourceCount + repairSymbolCount) * (FrameLengthPrefixSize + LinkerFecEncodedSymbol.HeaderSize));
         for (var i = 0; i < sourceLengths.Length; i++)
         {
             size = checked(size + sourceLengths[i]);
@@ -1009,7 +853,7 @@ public sealed class LinkerFecCodec : IDisposable
     {
         return checked(
             (2 * sourcePayloadLength) +
-            (2 * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize)) +
+            (2 * (FrameLengthPrefixSize + LinkerFecEncodedSymbol.HeaderSize)) +
             LinkerFecEncodedSymbol.RepairLengthSymbolSize);
     }
 
@@ -1096,8 +940,8 @@ public sealed class LinkerFecCodec : IDisposable
 
     private static ReadOnlySpan<byte> GetSingleRecordPayload(ReadOnlySpan<byte> record)
     {
-        var packetLength = BinaryPrimitives.ReadInt32LittleEndian(record[..sizeof(int)]);
-        return record.Slice(sizeof(int), packetLength);
+        var packetLength = ReadRecordLength(record);
+        return record.Slice(RecordLengthPrefixSize, packetLength);
     }
 
     private static int BuildSourceSegments(
@@ -1110,18 +954,13 @@ public sealed class LinkerFecCodec : IDisposable
         var sourceCount = 0;
         while (offset < records.Length)
         {
-            if (records.Length - offset < sizeof(int))
+            if (records.Length - offset < RecordLengthPrefixSize)
             {
                 throw new ArgumentException("Record list ended inside a packet length prefix.", nameof(records));
             }
 
-            var packetLength = BinaryPrimitives.ReadInt32LittleEndian(records.Slice(offset, sizeof(int)));
-            if (packetLength < 0)
-            {
-                throw new ArgumentException("Packet length prefix cannot be negative.", nameof(records));
-            }
-
-            var recordLength = checked(sizeof(int) + packetLength);
+            var packetLength = ReadRecordLength(records, offset);
+            var recordLength = checked(RecordLengthPrefixSize + packetLength);
             if (recordLength > records.Length - offset)
             {
                 throw new ArgumentException("Packet length prefix exceeds the remaining payload bytes.", nameof(records));
@@ -1143,7 +982,7 @@ public sealed class LinkerFecCodec : IDisposable
                     "Application record count exceeds the configured source symbol limit.");
             }
 
-            sourceOffsets[sourceCount] = offset + sizeof(int);
+            sourceOffsets[sourceCount] = offset + RecordLengthPrefixSize;
             sourceLengths[sourceCount] = packetLength;
             sourceCount++;
             offset += recordLength;
@@ -1205,29 +1044,23 @@ public sealed class LinkerFecCodec : IDisposable
     {
         error = string.Empty;
         packetCount = 0;
-        if (records.Length < sizeof(int))
+        if (records.Length < RecordLengthPrefixSize)
         {
-            error = "Expected at least one [4-byte length][payload] record.";
+            error = "Expected at least one [2-byte length][payload] record.";
             return false;
         }
 
         var offset = 0;
         while (offset < records.Length)
         {
-            if (records.Length - offset < sizeof(int))
+            if (records.Length - offset < RecordLengthPrefixSize)
             {
                 error = "Record list ended inside a packet length prefix.";
                 return false;
             }
 
-            var packetLength = BinaryPrimitives.ReadInt32LittleEndian(records.Slice(offset, sizeof(int)));
-            if (packetLength < 0)
-            {
-                error = "Packet length prefix cannot be negative.";
-                return false;
-            }
-
-            offset += sizeof(int);
+            var packetLength = ReadRecordLength(records, offset);
+            offset += RecordLengthPrefixSize;
             if (packetLength > records.Length - offset)
             {
                 error = "Packet length prefix exceeds the remaining payload bytes.";
@@ -1242,14 +1075,31 @@ public sealed class LinkerFecCodec : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void WriteInt32LittleEndian(Span<byte> destination, int offset, int value)
+    private static int ReadRecordLength(ReadOnlySpan<byte> records, int offset = 0)
     {
-        if (!BitConverter.IsLittleEndian)
+        return BinaryPrimitives.ReadUInt16LittleEndian(records.Slice(offset, RecordLengthPrefixSize));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteRecordLength(Span<byte> destination, int offset, int value)
+    {
+        if ((uint)value > LinkerFecOptions.MaxRecordPayloadLength)
         {
-            value = BinaryPrimitives.ReverseEndianness(value);
+            throw new ArgumentOutOfRangeException(nameof(value), value, "Record payload length exceeds the 2-byte record prefix limit.");
         }
 
-        Unsafe.WriteUnaligned(ref Unsafe.Add(ref MemoryMarshal.GetReference(destination), offset), value);
+        BinaryPrimitives.WriteUInt16LittleEndian(destination.Slice(offset, RecordLengthPrefixSize), checked((ushort)value));
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteFrameLength(Span<byte> destination, int offset, int value)
+    {
+        if ((uint)value > LinkerFecOptions.MaxFrameLength)
+        {
+            throw new InvalidOperationException("FEC frame length exceeds the 2-byte packetized frame prefix limit.");
+        }
+
+        BinaryPrimitives.WriteUInt16LittleEndian(destination.Slice(offset, FrameLengthPrefixSize), checked((ushort)value));
     }
 
     private bool TryDecodeReceivedBlock(
@@ -1285,7 +1135,6 @@ public sealed class LinkerFecCodec : IDisposable
     private void CompleteDecodedBlock(ulong blockId, DecoderBlock block)
     {
         _decoderBlocks.Remove(blockId);
-        DisposePendingStreamingDecodeBlock(blockId);
         MarkDecodedWindowBlockId(blockId);
         block.Dispose();
     }
@@ -1298,14 +1147,14 @@ public sealed class LinkerFecCodec : IDisposable
 
     private static int WriteSourcePayloadRecord(ReadOnlySpan<byte> payload, Span<byte> destination)
     {
-        var recordLength = checked(sizeof(int) + payload.Length);
+        var recordLength = checked(RecordLengthPrefixSize + payload.Length);
         if (destination.Length < recordLength)
         {
             throw new ArgumentException("Destination buffer is smaller than the decoded source packet.", nameof(destination));
         }
 
-        WriteInt32LittleEndian(destination, 0, payload.Length);
-        payload.CopyTo(destination.Slice(sizeof(int), payload.Length));
+        WriteRecordLength(destination, 0, payload.Length);
+        payload.CopyTo(destination.Slice(RecordLengthPrefixSize, payload.Length));
         return recordLength;
     }
 
@@ -1321,7 +1170,6 @@ public sealed class LinkerFecCodec : IDisposable
         fecRecoveredPacketCount = 0;
         handled = false;
 
-        var blockLength = LinkerFecEncodedSymbol.ReadBlockLength(encodedFrame);
         var symbolSize = _options.SymbolSize;
         var sourceSymbolCount = LinkerFecEncodedSymbol.ReadSourceSymbolCount(encodedFrame);
         if (sourceSymbolCount != 1)
@@ -1348,19 +1196,9 @@ public sealed class LinkerFecCodec : IDisposable
             throw new InvalidDataException("Symbol id is outside the block.");
         }
 
-        if (blockLength < 0 || blockLength > symbolSize + sizeof(int))
-        {
-            throw new InvalidDataException("Block length exceeds source symbol capacity.");
-        }
-
         if (payloadLength > symbolSize)
         {
             throw new InvalidDataException("Payload cannot exceed symbol size.");
-        }
-
-        if (destination.Length < blockLength)
-        {
-            throw new ArgumentException("Destination buffer is smaller than the decoded block.", nameof(destination));
         }
 
         if (isFinalBlock)
@@ -1378,23 +1216,19 @@ public sealed class LinkerFecCodec : IDisposable
 
         if (!isRepair)
         {
-            if (payloadLength + sizeof(int) != blockLength)
+            var sourceRecordLength = checked(RecordLengthPrefixSize + payloadLength);
+            if (destination.Length < sourceRecordLength)
             {
-                throw new InvalidDataException("Source payload length does not match the block length.");
+                throw new ArgumentException("Destination buffer is smaller than the decoded source packet.", nameof(destination));
             }
 
-            WriteInt32LittleEndian(destination, 0, payloadLength);
-            payload.CopyTo(destination.Slice(sizeof(int), payloadLength));
+            WriteRecordLength(destination, 0, payloadLength);
+            payload.CopyTo(destination.Slice(RecordLengthPrefixSize, payloadLength));
 
             DisposeDecoderBlock(blockId);
             MarkDecodedWindowBlockId(blockId);
-            bytesWritten = blockLength;
+            bytesWritten = sourceRecordLength;
             return true;
-        }
-
-        if (TryCompleteAlreadyDeliveredStreamingSourceBlock(blockId, sourceSymbolCount))
-        {
-            return false;
         }
 
         if (payloadLength > symbolSize)
@@ -1412,13 +1246,19 @@ public sealed class LinkerFecCodec : IDisposable
         }
 
         var recoveredPayloadLength = DecodeSingleSourceLength(LinkerFecEncodedSymbol.ReadLengthSymbol(encodedFrame), coefficient);
-        if (recoveredPayloadLength + sizeof(int) != blockLength || recoveredPayloadLength > payloadLength)
+        if (recoveredPayloadLength > payloadLength)
         {
             throw new InvalidDataException("Recovered source payload length is inconsistent with the FEC block.");
         }
 
-        WriteInt32LittleEndian(destination, 0, recoveredPayloadLength);
-        var recoveredPayload = destination.Slice(sizeof(int), recoveredPayloadLength);
+        var recoveredRecordLength = checked(RecordLengthPrefixSize + recoveredPayloadLength);
+        if (destination.Length < recoveredRecordLength)
+        {
+            throw new ArgumentException("Destination buffer is smaller than the decoded source packet.", nameof(destination));
+        }
+
+        WriteRecordLength(destination, 0, recoveredPayloadLength);
+        var recoveredPayload = destination.Slice(RecordLengthPrefixSize, recoveredPayloadLength);
         if (coefficient == 1)
         {
             payload[..recoveredPayloadLength].CopyTo(recoveredPayload);
@@ -1430,25 +1270,8 @@ public sealed class LinkerFecCodec : IDisposable
 
         DisposeDecoderBlock(blockId);
         MarkDecodedWindowBlockId(blockId);
-        bytesWritten = blockLength;
+        bytesWritten = recoveredRecordLength;
         fecRecoveredPacketCount = 1;
-        return true;
-    }
-
-    private bool TryCompleteAlreadyDeliveredStreamingSourceBlock(ulong blockId, int sourceSymbolCount)
-    {
-        if (!_pendingStreamingDecodeBlocks.TryGetValue(blockId, out var pending))
-        {
-            return false;
-        }
-
-        if (!pending.ContainsAllSources(sourceSymbolCount))
-        {
-            return false;
-        }
-
-        DisposePendingStreamingDecodeBlock(blockId);
-        MarkDecodedWindowBlockId(blockId);
         return true;
     }
 
@@ -1551,7 +1374,6 @@ public sealed class LinkerFecCodec : IDisposable
             block.Dispose();
         }
 
-        DisposePendingStreamingDecodeBlock(blockId);
     }
 
     private void AddDecodedWindowBlockId(ulong blockId)
@@ -1645,10 +1467,6 @@ public sealed class LinkerFecCodec : IDisposable
             block.Dispose();
         }
 
-        while (TryFindPendingStreamingDecodeBlockBefore(minBlockId, out var pendingBlockId))
-        {
-            DisposePendingStreamingDecodeBlock(pendingBlockId);
-        }
     }
 
     private bool TryFindDecoderBlockBefore(ulong minBlockId, out ulong blockId)
@@ -1664,152 +1482,6 @@ public sealed class LinkerFecCodec : IDisposable
         }
 
         return false;
-    }
-
-    private bool TryFindPendingStreamingDecodeBlockBefore(ulong minBlockId, out ulong blockId)
-    {
-        blockId = 0;
-        foreach (var pair in _pendingStreamingDecodeBlocks)
-        {
-            if (pair.Key < minBlockId)
-            {
-                blockId = pair.Key;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private void DisposePendingStreamingDecodeBlock(ulong blockId)
-    {
-        if (_pendingStreamingDecodeBlocks.Remove(blockId, out var pending))
-        {
-            pending.Dispose();
-        }
-    }
-
-    private sealed class PendingStreamingDecodeBlock : IDisposable
-    {
-        private readonly byte[][]? _payloads;
-        private readonly int[] _payloadLengths;
-        private readonly bool[] _assigned;
-        private bool _disposed;
-
-        public PendingStreamingDecodeBlock(int sourceSymbolLimit)
-        {
-            _payloads = new byte[sourceSymbolLimit][];
-            _payloadLengths = new int[sourceSymbolLimit];
-            _assigned = new bool[sourceSymbolLimit];
-        }
-
-        public bool Add(int symbolId, ReadOnlySpan<byte> payload)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_assigned[symbolId])
-            {
-                return false;
-            }
-
-            var rented = payload.Length == 0 ? Array.Empty<byte>() : ArrayPool<byte>.Shared.Rent(payload.Length);
-            if (payload.Length != 0)
-            {
-                payload.CopyTo(rented);
-            }
-
-            _payloads![symbolId] = rented;
-            _payloadLengths[symbolId] = payload.Length;
-            _assigned[symbolId] = true;
-            return true;
-        }
-
-        public bool ContainsAllSources(int sourceSymbolCount)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (sourceSymbolCount < 0 || sourceSymbolCount > _assigned.Length)
-            {
-                throw new ArgumentOutOfRangeException(nameof(sourceSymbolCount), sourceSymbolCount, "Invalid source symbol count.");
-            }
-
-            for (var symbolId = 0; symbolId < _assigned.Length; symbolId++)
-            {
-                if (!_assigned[symbolId])
-                {
-                    if (symbolId < sourceSymbolCount)
-                    {
-                        return false;
-                    }
-
-                    continue;
-                }
-
-                if (symbolId >= sourceSymbolCount)
-                {
-                    throw new InvalidDataException("Buffered streaming source exceeds the finalized source count.");
-                }
-            }
-
-            return true;
-        }
-
-        public void AddToBlock(DecoderBlock block)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            for (var symbolId = 0; symbolId < _assigned.Length; symbolId++)
-            {
-                if (!_assigned[symbolId])
-                {
-                    continue;
-                }
-
-                if (symbolId >= block.SourceSymbolCount)
-                {
-                    throw new InvalidDataException("Buffered streaming source exceeds the finalized source count.");
-                }
-
-                var payload = _payloads![symbolId].AsSpan(0, _payloadLengths[symbolId]);
-                var symbol = ReceivedSymbol.CreatePooledSource(
-                    block.BlockId,
-                    block.BlockLength,
-                    block.SymbolSize,
-                    block.SourceSymbolCount,
-                    block.RepairSymbolCount,
-                    symbolId,
-                    block.IsFinalBlock,
-                    payload);
-                if (!block.Add(symbol))
-                {
-                    symbol.Dispose();
-                }
-            }
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
-            for (var i = 0; i < _assigned.Length; i++)
-            {
-                if (!_assigned[i])
-                {
-                    continue;
-                }
-
-                var payload = _payloads![i];
-                if (payload.Length != 0)
-                {
-                    ArrayPool<byte>.Shared.Return(payload);
-                }
-
-                _payloads[i] = Array.Empty<byte>();
-                _payloadLengths[i] = 0;
-                _assigned[i] = false;
-            }
-        }
     }
 
     private void ThrowIfDisposed()
@@ -1828,11 +1500,5 @@ public sealed class LinkerFecCodec : IDisposable
         }
 
         _decoderBlocks.Clear();
-        foreach (var pending in _pendingStreamingDecodeBlocks.Values)
-        {
-            pending.Dispose();
-        }
-
-        _pendingStreamingDecodeBlocks.Clear();
     }
 }

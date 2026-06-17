@@ -1,3 +1,6 @@
+using System;
+using System.Linq;
+
 namespace linker.fec.Internal;
 
 internal static class GaloisMatrix

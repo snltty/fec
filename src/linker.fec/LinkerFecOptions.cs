@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
 namespace linker.fec;
 
 public enum LinkerFecRepairGenerationMode
@@ -10,23 +14,37 @@ public enum LinkerFecRepairGenerationMode
 public sealed class LinkerFecOptions
 {
     public const int MinSymbolSize = 64;
-    public const int MaxSymbolSize = 65_535;
+    public const int MaxSymbolSize = MaxFrameLength - LinkerFecEncodedSymbol.HeaderSize - LinkerFecEncodedSymbol.RepairLengthSymbolSize;
     public const int MinSourceSymbolsPerBlock = 1;
     public const int MaxSourceSymbolsPerBlock = byte.MaxValue;
     public const int MinRepairSymbolsPerBlock = 1;
     public const int MaxRepairSymbolsPerBlock = byte.MaxValue;
     public const int MaxSymbolsPerBlock = byte.MaxValue + 1;
+    public const int RecordLengthPrefixSize = sizeof(ushort);
+    public const int MaxRecordPayloadLength = ushort.MaxValue;
+    public const int FrameLengthPrefixSize = sizeof(ushort);
+    public const int MaxFrameLength = ushort.MaxValue;
 
-    public int SymbolSize { get; init; } = 1440;
-    public int SourceSymbolsPerBlock { get; init; } = 2;
-    public int RepairSymbolsPerBlock { get; init; } = 1;
+    public int SymbolSize { get; init; } = 1420 + LinkerFecEncodedSymbol.HeaderSize;
+    public int SourceSymbolsPerBlock { get; init; } = 10;
+    public int RepairSymbolsPerBlock { get; init; } = 2;
     public IReadOnlyList<LinkerFecRepairProfilePoint>? RepairProfile { get; init; }
     public int MaxDecoderBlocks { get; init; } = 256;
-    public int MaxSkipBlocks { get; init; } = 10;
+    public int MaxSkipBlocks { get; init; } = 30;
     public LinkerFecRepairGenerationMode RepairGenerationMode { get; init; } = LinkerFecRepairGenerationMode.Auto;
 
-    public int BlockSize => checked(SymbolSize * SourceSymbolsPerBlock);
-
+    public int MaxSourceSymbolsPerEncodedBlock
+    {
+        get
+        {
+            var profile = RepairProfile;
+            if (profile is null || profile.Count == 0)
+            {
+                return SourceSymbolsPerBlock;
+            }
+            return profile.Max(c => c.SourceSymbols);
+        }
+    }
     public int MaxRepairSymbolsPerEncodedBlock
     {
         get
@@ -36,24 +54,15 @@ public sealed class LinkerFecOptions
             {
                 return RepairSymbolsPerBlock;
             }
-
-            var maxRepair = profile[0].RepairSymbols;
-            for (var i = 1; i < profile.Count; i++)
-            {
-                maxRepair = Math.Max(maxRepair, profile[i].RepairSymbols);
-            }
-
-            return maxRepair;
+            return profile.Max(c => c.RepairSymbols);
         }
     }
 
     public int MaxEncodeBufferSize => checked(
-        SourceSymbolsPerBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + SymbolSize) +
-        MaxRepairSymbolsPerEncodedBlock * (sizeof(int) + LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + SymbolSize));
+        SourceSymbolsPerBlock * (FrameLengthPrefixSize + LinkerFecEncodedSymbol.HeaderSize + SymbolSize) +
+        MaxRepairSymbolsPerEncodedBlock * (FrameLengthPrefixSize + LinkerFecEncodedSymbol.HeaderSize + sizeof(ushort) + SymbolSize));
 
-    public int MaxDecodeBufferSize => checked((SymbolSize + sizeof(int)) * SourceSymbolsPerBlock);
-
-    public int MaxRecordListSize => MaxDecodeBufferSize;
+    public int MaxDecodeBufferSize => checked((SymbolSize + RecordLengthPrefixSize) * SourceSymbolsPerBlock);
 
     public int GetRepairSymbolsForSourceCount(int sourceSymbolCount)
     {
@@ -132,13 +141,7 @@ public sealed class LinkerFecOptions
                 "The compact frame format supports at most 256 total source and repair symbols per block.");
         }
 
-        if ((long)(SymbolSize + sizeof(int)) * SourceSymbolsPerBlock > LinkerFecEncodedSymbol.MaxBlockLength)
-        {
-            throw new ArgumentOutOfRangeException(nameof(SourceSymbolsPerBlock),
-                "The configured decoded record list is larger than the compact frame block length limit.");
-        }
-
-        if ((long)(SymbolSize + sizeof(int)) * SourceSymbolsPerBlock > Array.MaxLength)
+        if ((long)(SymbolSize + RecordLengthPrefixSize) * SourceSymbolsPerBlock > Array.MaxLength)
         {
             throw new ArgumentOutOfRangeException(nameof(SourceSymbolsPerBlock),
                 "The configured decoded record list is larger than a single .NET byte array.");

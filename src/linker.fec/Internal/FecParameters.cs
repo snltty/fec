@@ -1,3 +1,5 @@
+using System;
+
 namespace linker.fec.Internal;
 
 internal readonly record struct FecParameters(int KPrime, int J, int S, int H, int W)

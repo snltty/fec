@@ -1,3 +1,5 @@
+using System;
+
 namespace linker.fec.Internal;
 
 // Generated from fec-reference.txt sections 5.5 and 5.6.

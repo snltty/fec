@@ -7,6 +7,12 @@ _out/
 
 UDPspeeder-branch_libev/
 
+kcp-go-master/
+
+quic-go-master/
+
+coturn-master/
+
 *.user
 *.suo
 *.log

@@ -1,5 +1,7 @@
+using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.IO;
 
 namespace linker.fec.Internal;
 
@@ -198,7 +200,6 @@ internal sealed class DecoderBlock : IDisposable
             CopySourcePayloadTo(_sourceSymbols[i].PayloadSpan, destination, ref writeOffset);
         }
 
-        ValidateCopiedBlockLength(writeOffset);
         bytesWritten = writeOffset;
         return true;
     }
@@ -275,8 +276,7 @@ internal sealed class DecoderBlock : IDisposable
                 var recoveredPayloadLength = BinaryPrimitives.ReadUInt16LittleEndian(recoveredLength);
                 if (includeKnownSources)
                 {
-                    CopyKnownAndRecoveredTo(destination, missingSourceId, recoveredSymbol, recoveredPayloadLength);
-                    bytesWritten = BlockLength;
+                    CopyKnownAndRecoveredTo(destination, missingSourceId, recoveredSymbol, recoveredPayloadLength, out bytesWritten);
                 }
                 else
                 {
@@ -394,8 +394,7 @@ internal sealed class DecoderBlock : IDisposable
 
             if (includeKnownSources)
             {
-                CopyKnownAndRecoveredTo(destination, missingIds, values, valueSymbolSize, solutionRows);
-                bytesWritten = BlockLength;
+                CopyKnownAndRecoveredTo(destination, missingIds, values, valueSymbolSize, solutionRows, out bytesWritten);
             }
             else
             {
@@ -432,7 +431,8 @@ internal sealed class DecoderBlock : IDisposable
         Span<byte> destination,
         int missingSourceId,
         ReadOnlySpan<byte> recovered,
-        int recoveredPayloadLength)
+        int recoveredPayloadLength,
+        out int bytesWritten)
     {
         var writeOffset = 0;
         for (var sourceId = 0; sourceId < SourceSymbolCount; sourceId++)
@@ -452,7 +452,7 @@ internal sealed class DecoderBlock : IDisposable
             }
         }
 
-        ValidateCopiedBlockLength(writeOffset);
+        bytesWritten = writeOffset;
     }
 
     private void CopyKnownAndRecoveredTo(
@@ -460,7 +460,8 @@ internal sealed class DecoderBlock : IDisposable
         ReadOnlySpan<int> missingIds,
         ReadOnlySpan<byte> values,
         int valueSymbolSize,
-        ReadOnlySpan<int> solutionRows)
+        ReadOnlySpan<int> solutionRows,
+        out int bytesWritten)
     {
         var missingIndex = 0;
         var writeOffset = 0;
@@ -494,7 +495,7 @@ internal sealed class DecoderBlock : IDisposable
             missingIndex++;
         }
 
-        ValidateCopiedBlockLength(writeOffset);
+        bytesWritten = writeOffset;
     }
 
     private void CopyRecoveredOnlyTo(
@@ -552,24 +553,18 @@ internal sealed class DecoderBlock : IDisposable
 
     private void WriteRecordTo(ReadOnlySpan<byte> payload, Span<byte> destination, ref int writeOffset)
     {
-        var recordLength = checked(sizeof(int) + payload.Length);
+        var recordLength = checked(LinkerFecOptions.RecordLengthPrefixSize + payload.Length);
         if (recordLength > BlockLength - writeOffset)
         {
             throw new InvalidDataException("Decoded source payloads exceed the block length.");
         }
 
-        BinaryPrimitives.WriteInt32LittleEndian(destination.Slice(writeOffset, sizeof(int)), payload.Length);
-        writeOffset += sizeof(int);
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            destination.Slice(writeOffset, LinkerFecOptions.RecordLengthPrefixSize),
+            checked((ushort)payload.Length));
+        writeOffset += LinkerFecOptions.RecordLengthPrefixSize;
         payload.CopyTo(destination.Slice(writeOffset, payload.Length));
         writeOffset += payload.Length;
-    }
-
-    private void ValidateCopiedBlockLength(int bytesWritten)
-    {
-        if (bytesWritten != BlockLength)
-        {
-            throw new InvalidDataException($"Decoded source payload length {bytesWritten} does not match block length {BlockLength}.");
-        }
     }
 
     private static void AddScaledLengthSymbol(Span<byte> destination, int sourceLength, byte coefficient)
