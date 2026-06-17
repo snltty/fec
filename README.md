@@ -1,4 +1,4 @@
-这是一个零分配、高性能面向UDP实时传输的前向纠错（FEC）库。它把原始业务包编码成系统源帧和修复帧，接收端在部分 FEC 帧丢失时仍可恢复原始数据，用来降低UDP丢包对业务层的影响。
+这是一个linker使用的库项目，包括 FEC、KCP、STUN
 
 ## 1、FEC
 
@@ -91,7 +91,8 @@ RFC 5780 NAT类型测试
 
 ```csharp
 StunClient stun = new StunClient();
-StunNatBehaviorResult result = await stun.DiscoverNatBehaviorAsync("支持RFC 5780的服务器", 3478, new StunClientOptions
+StunNatBehaviorResult result = await stun.DiscoverNatBehaviorAsync("支持RFC 5780的服务器", 3478,
+new StunClientOptions
 {
     AddressFamilyMode = StunAddressFamilyMode.Ipv6Preferred,
     MaxAttempts = 3
